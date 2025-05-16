@@ -1,3 +1,6 @@
+### This script trains a GNN model on paired SMILES data for predicting multiple properties.
+# It includes data loading, preprocessing, model training, evaluation, and plotting.    
+
 # --- START OF FILE train.py ---
 
 import torch

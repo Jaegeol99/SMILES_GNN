@@ -8,6 +8,8 @@ from torch_geometric.nn import GATConv, global_max_pool
 from torch_geometric.data import Data, Batch # Batch is already imported
 from typing import Optional
 
+asdfasdf
+
 class GNNEncoder(nn.Module):
     """
     Graph Encoder using multiple GAT layers followed by global max pooling.

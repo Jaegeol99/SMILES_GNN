@@ -4,9 +4,10 @@ import torch.optim as optim
 from sklearn.model_selection import train_test_split
 import numpy as np
 import os
+import logging
 
 from config import (
-    HYPERPARAMS, PROPERTY_NAMES, MODEL_SAVE_PATH, LABEL_SCALING_PARAMS_PATH
+    HYPERPARAMS, PROPERTY_NAMES, MODEL_SAVE_PATH, LABEL_SCALING_PARAMS_PATH, LOGGING_LEVEL, LOG_FORMAT
 )
 from data_processing import (
     load_and_preprocess_paired_data,
@@ -15,15 +16,18 @@ from data_processing import (
     inverse_scale_labels,
     create_paired_dataloaders
 )
-from gnn_model import PairedLOHCGNN
+from gnn_model import LOHCGNN
 from training_utils import (
     train_epoch, evaluate_epoch, evaluate_metrics, plot_results
 )
+from feature_configs import NUM_BOND_FEATURES, NUM_LINE_EDGE_FEATURES
 
 def main():
+    logging.basicConfig(level=LOGGING_LEVEL, format=LOG_FORMAT)
+    
     paired_data_list, num_node_features = load_and_preprocess_paired_data()
-
-    if not paired_data_list or num_node_features <= 0:
+    if not paired_data_list:
+        logging.error("No valid data loaded. Exiting.")
         return
 
     indices = list(range(len(paired_data_list)))
@@ -46,15 +50,16 @@ def main():
     )
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    logging.info(f"Using device: {device}")
 
-    model = PairedLOHCGNN(
-        num_node_features=num_node_features,
-        hidden_channels=HYPERPARAMS['hidden_channels'],
+    model = LOHCGNN(
+        node_in_dim=num_node_features,
+        edge_in_dim=NUM_BOND_FEATURES,
+        line_edge_in_dim=NUM_LINE_EDGE_FEATURES,
+        hidden_dim=HYPERPARAMS['hidden_dim'],
+        num_layers=HYPERPARAMS['num_layers'],
         num_output_features=HYPERPARAMS['num_output_features'],
-        dropout_rate=HYPERPARAMS['dropout_rate'],
-        gnn_layers=HYPERPARAMS.get('gnn_layers', 3),
-        gat_heads=HYPERPARAMS.get('gat_heads', 4),
-        gat_output_heads=HYPERPARAMS.get('gat_output_heads', 1)
+        dropout_rate=HYPERPARAMS['dropout_rate']
     ).to(device)
 
     criterion = nn.MSELoss()
@@ -68,15 +73,18 @@ def main():
         train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
         test_loss, _, _, _ = evaluate_epoch(model, test_loader, criterion, device)
 
+        logging.info(f"Epoch {epoch+1}/{HYPERPARAMS['epochs']}: Train Loss = {train_loss:.4f}, Test Loss = {test_loss:.4f}")
         train_losses_history.append(train_loss)
         test_losses_history.append(test_loss)
 
         if test_loss < best_test_loss:
             best_test_loss = test_loss
             torch.save(model.state_dict(), MODEL_SAVE_PATH)
+            logging.info(f"Saved best model with test loss: {best_test_loss:.4f}")
 
     if len(test_loader.dataset) > 0:
         model.load_state_dict(torch.load(MODEL_SAVE_PATH, map_location=device))
+        logging.info("Loaded best model for final evaluation")
         _, predictions_scaled, actual_values_scaled, _ = evaluate_epoch(
             model, test_loader, criterion, device
         )
@@ -102,6 +110,11 @@ def main():
                 PROPERTY_NAMES,
                 output_dir="."
             )
+            logging.info("Evaluation and plotting completed.")
+        else:
+            logging.warning("No predictions or actual values to evaluate.")
+    else:
+        logging.warning("Test dataset is empty.")
 
 if __name__ == "__main__":
     main()

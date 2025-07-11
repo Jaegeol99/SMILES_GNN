@@ -1,52 +1,82 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GATConv, global_max_pool
+from torch_geometric.nn import MessagePassing, global_mean_pool
 from torch_geometric.data import Batch
+from typing import Tuple
 
-class GNNEncoder(nn.Module):
-    def __init__(self, num_node_features: int, hidden_channels: int, num_layers: int = 3,
-                 dropout_rate: float = 0.5, heads: int = 4, output_heads: int = 1):
+class EdgeGatedConv(MessagePassing):
+    def __init__(self, node_in_dim: int, edge_in_dim: int, out_dim: int):
+        super().__init__(aggr='add')
+        self.node_mlp = nn.Linear(node_in_dim + edge_in_dim, out_dim)
+        self.edge_mlp = nn.Linear(node_in_dim + node_in_dim + edge_in_dim, out_dim)
+        self.gate_mlp = nn.Linear(node_in_dim + edge_in_dim, out_dim)
+
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.propagate(edge_index, x=x, edge_attr=edge_attr)
+
+    def message(self, x_i: torch.Tensor, x_j: torch.Tensor, edge_attr: torch.Tensor) -> torch.Tensor:
+        gate = torch.sigmoid(self.gate_mlp(torch.cat([x_i, edge_attr], dim=-1)))
+        return gate * self.node_mlp(torch.cat([x_j, edge_attr], dim=-1))
+
+    def update(self, aggr_out: torch.Tensor, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        new_x = aggr_out
+        row, col = edge_index
+        edge_input = torch.cat([x[row], x[col], edge_attr], dim=-1)
+        new_edge_attr = self.edge_mlp(edge_input)
+        return new_x, new_edge_attr
+
+class LOHCGNN(nn.Module):
+    def __init__(self, node_in_dim: int, edge_in_dim: int, line_edge_in_dim: int,
+                 hidden_dim: int, num_layers: int, num_output_features: int, dropout_rate: float = 0.5):
         super().__init__()
-        self.convs = nn.ModuleList()
-        curr_dim = num_node_features
+        self.node_embed = nn.Linear(node_in_dim, hidden_dim)
+        self.edge_embed = nn.Linear(edge_in_dim, hidden_dim)
+        self.line_edge_embed = nn.Linear(line_edge_in_dim, hidden_dim)
 
-        self.convs.append(GATConv(curr_dim, hidden_channels, heads=heads, dropout=dropout_rate, concat=True))
-        curr_dim = hidden_channels * heads
+        self.atom_conv_layers = nn.ModuleList([
+            EdgeGatedConv(hidden_dim, hidden_dim, hidden_dim) for _ in range(num_layers)
+        ])
+        self.line_conv_layers = nn.ModuleList([
+            EdgeGatedConv(hidden_dim, hidden_dim, hidden_dim) for _ in range(num_layers)
+        ])
 
-        for _ in range(num_layers - 2):
-            self.convs.append(GATConv(curr_dim, hidden_channels, heads=heads, dropout=dropout_rate, concat=True))
-            curr_dim = hidden_channels * heads
-
-        self.convs.append(GATConv(curr_dim, hidden_channels, heads=output_heads, dropout=dropout_rate, concat=False))
-        self.out_dim = hidden_channels * output_heads
-
-    def forward(self, data: Batch) -> torch.Tensor:
-        x, edge_index, batch = data.x, data.edge_index, data.batch
-        for i, conv in enumerate(self.convs):
-            x = conv(x, edge_index)
-            if i < len(self.convs) - 1:
-                x = F.elu(x)
-        return global_max_pool(x, batch)
-
-class PairedLOHCGNN(nn.Module):
-    def __init__(self, num_node_features: int, hidden_channels: int, num_output_features: int,
-                 gnn_layers: int = 3, mlp_hidden_factor: int = 1, dropout_rate: float = 0.5,
-                 gat_heads: int = 4, gat_output_heads: int = 1):
-        super().__init__()
-        self.encoder = GNNEncoder(num_node_features, hidden_channels, num_layers=gnn_layers,
-                                  dropout_rate=dropout_rate, heads=gat_heads, output_heads=gat_output_heads)
-        mlp_input_size = self.encoder.out_dim * 2
-        mlp_hidden = hidden_channels * mlp_hidden_factor
         self.mlp = nn.Sequential(
-            nn.Linear(mlp_input_size, mlp_hidden),
+            nn.Linear(hidden_dim * 2, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(mlp_hidden, num_output_features)
+            nn.Linear(hidden_dim, num_output_features)
         )
 
-    def forward(self, data1: Batch, data2: Batch) -> torch.Tensor:
-        emb1 = self.encoder(data1)
-        emb2 = self.encoder(data2)
-        combined = torch.cat([emb1, emb2], dim=-1)
+    def forward(self, atom_data: Batch, line_data: Batch) -> torch.Tensor:
+        h_h = self.node_embed(atom_data.x)
+        e_h = self.edge_embed(atom_data.edge_attr)
+        l_h = self.edge_embed(line_data.x)
+        le_h = self.line_edge_embed(line_data.edge_attr)
+
+        h_d = self.node_embed(atom_data.x_de)
+        e_d = self.edge_embed(atom_data.edge_attr_de)
+        l_d = self.edge_embed(line_data.x_de)
+        le_d = self.line_edge_embed(line_data.edge_attr_de)
+
+        for atom_conv, line_conv in zip(self.atom_conv_layers, self.line_conv_layers):
+            l_h_update, le_h_update = line_conv(l_h, line_data.edge_index, le_h)
+            l_d_update, le_d_update = line_conv(l_d, line_data.edge_index_de, le_d)
+            
+            h_h_update, e_h_update = atom_conv(h_h, atom_data.edge_index, e_h)
+            h_d_update, e_d_update = atom_conv(h_d, atom_data.edge_index_de, e_d)
+
+            h_h = h_h + h_h_update
+            e_h = e_h + e_h_update
+            l_h = l_h + l_h_update
+            le_h = le_h + le_h_update
+            
+            h_d = h_d + h_d_update
+            e_d = e_d + e_d_update
+            l_d = l_d + l_d_update
+            le_d = le_d + le_d_update
+
+        h_h = global_mean_pool(h_h, atom_data.batch)
+        h_d = global_mean_pool(h_d, atom_data.batch_de)
+        combined = torch.cat([h_h, h_d], dim=-1)
         return self.mlp(combined)

@@ -1,6 +1,6 @@
 import torch
 from rdkit import Chem
-import logging 
+import logging
 from typing import List, Dict, Set, Any
 
 HETEROATOMS_N: Set[int] = {7}
@@ -48,30 +48,37 @@ for name, smarts in IMPORTANT_MOTIFS_SMARTS.items():
     mol_pattern = Chem.MolFromSmarts(smarts)
     if mol_pattern:
         IMPORTANT_MOTIFS_PATTERNS[name] = mol_pattern
-        
 NUM_IMPORTANT_MOTIFS: int = len(IMPORTANT_MOTIFS_PATTERNS)
 
 NUM_FUNC_GROUP_ATOM_FEATURES: int = NUM_FUNC_GROUPS
 
 ATOM_FEATURE_MAX_BASIC_DIST_DIRECT_FUNCATOM: torch.Tensor = torch.tensor([
-    118, 6, 8, 4, 1, 2, 3, 4, 5, 1, 2.5, 1.0,
+    118, 6, 8, 1, 2, 3, 4, 5, 1, 2.5, 1.0,
     MAX_HETERO_DIST, MAX_HETERO_DIST, MAX_HETERO_DIST, MAX_HETERO_DIST,
-    4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 
+    4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0,
     1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
 ], dtype=torch.float)
-NUM_ATOM_BASIC_DIST_DIRECT_FUNCATOM: int = ATOM_FEATURE_MAX_BASIC_DIST_DIRECT_FUNCATOM.shape[0] 
+NUM_ATOM_BASIC_DIST_DIRECT_FUNCATOM: int = ATOM_FEATURE_MAX_BASIC_DIST_DIRECT_FUNCATOM.shape[0]
 
 NEIGHBOR_FEATURE_MAX: torch.Tensor = torch.tensor(
     [4.0] * NUM_NEIGHBOR_FEATURES, dtype=torch.float
 )
 
 MOL_DESCRIPTOR_MAX_VALUES: torch.Tensor = torch.tensor([
-    10, 5, 5, 5, 5, 
-    10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 
-    10, 150, 20, 15, 15, 15, 15, 10, 10, 1, 200, 100, 100, 100, 
+    10, 5, 5, 5, 5,
+    10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
+    10, 150, 20, 15, 15, 15, 15, 10, 10, 1, 200, 100, 100, 100,
     5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0,
 ], dtype=torch.float)
 NUM_MOL_DESCRIPTORS_TOTAL: int = MOL_DESCRIPTOR_MAX_VALUES.shape[0]
+
+# Bond feature max values
+BOND_FEATURE_MAX: torch.Tensor = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=torch.float)
+NUM_BOND_FEATURES: int = BOND_FEATURE_MAX.shape[0]
+
+# Line graph edge feature max values
+LINE_EDGE_FEATURE_MAX: torch.Tensor = torch.tensor([1.0], dtype=torch.float)
+NUM_LINE_EDGE_FEATURES: int = LINE_EDGE_FEATURE_MAX.shape[0]
 
 TOTAL_FEATURE_DIMENSION: int = (
     NUM_ATOM_BASIC_DIST_DIRECT_FUNCATOM +

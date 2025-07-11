@@ -10,9 +10,6 @@ from typing import List, Tuple, Dict, Any
 from tqdm import tqdm
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 import logging
-sdfgdsfg
-
-asdfasdf
 
 def train_epoch(model: nn.Module,
                 loader: DataLoader,

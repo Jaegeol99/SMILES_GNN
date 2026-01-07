@@ -7,12 +7,18 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from matplotlib.gridspec import GridSpec
+from matplotlib.ticker import MaxNLocator
 import os
 from typing import List, Tuple, Dict, Any
 from tqdm import tqdm
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 import logging
+# --- ▼▼▼ [수정 1/2] 숫자 포맷을 변경하기 위해 Formatter를 import 합니다 ▼▼▼ ---
+from matplotlib.ticker import FormatStrFormatter
+# --- ▲▲▲ [수정 완료] ▲▲▲ ---
 
+
+# ... train_epoch, evaluate_epoch, evaluate_metrics 함수는 변경 없음 ...
 def train_epoch(model: nn.Module,
                 loader: DataLoader,
                 criterion: nn.Module,
@@ -101,6 +107,7 @@ def evaluate_epoch(model: nn.Module,
 
     return avg_loss, predictions, targets, identifiers_list
 
+
 def evaluate_metrics(predictions: np.ndarray,
                      actuals: np.ndarray,
                      property_names: List[str]) -> Dict[str, Dict[str, float]]:
@@ -123,22 +130,25 @@ def evaluate_metrics(predictions: np.ndarray,
 
         if actual_valid.size < 2:
             logging.warning(f"Insufficient valid data for property: {prop_name}")
-            results[prop_name] = {'MSE': np.nan, 'R2': np.nan, 'MAE': np.nan}
+            results[prop_name] = {'MSE': np.nan, 'R2': np.nan, 'MAE': np.nan, 'RMSE': np.nan}
             continue
 
         mse = mean_squared_error(actual_valid, pred_valid)
         r2 = r2_score(actual_valid, pred_valid)
         mae = mean_absolute_error(actual_valid, pred_valid)
-        results[prop_name] = {'MSE': mse, 'R2': r2, 'MAE': mae}
+        rmse = np.sqrt(mse)
+        results[prop_name] = {'MSE': mse, 'R2': r2, 'MAE': mae, 'RMSE': rmse}
 
         logging.info(f"Metrics for {prop_name}:")
-        logging.info(f"  MSE: {mse:.4f}")
         logging.info(f"  R2: {r2:.4f}")
         logging.info(f"  MAE: {mae:.4f}")
+        logging.info(f"  RMSE: {rmse:.4f}")
+        logging.info(f"  MSE: {mse:.4f}")
+
 
     return results
 
-def plot_results(train_losses: List[float], test_losses: List[float],
+def plot_results(train_losses: List[float], val_losses: List[float],
                  actual_original: np.ndarray, pred_original: np.ndarray,
                  property_names: List[str],
                  metrics: Dict[str, Dict[str, float]],
@@ -146,21 +156,24 @@ def plot_results(train_losses: List[float], test_losses: List[float],
     os.makedirs(output_dir, exist_ok=True)
     base_filename = "model"
 
-    # 손실 곡선 플롯 (변경 없음)
-    fig_loss, ax_loss = plt.subplots(figsize=(10, 6))
-    ax_loss.plot(train_losses, label='Train Loss', color='royalblue', linewidth=2)
-    ax_loss.plot(test_losses, label='Test Loss', color='darkorange', linewidth=2)
-    ax_loss.set_xlabel('Epoch', fontsize=12)
-    ax_loss.set_ylabel('Loss (Scaled MSE)', fontsize=12)
-    ax_loss.set_title(f'Training & Test Loss Curve ({base_filename})', fontsize=14)
-    ax_loss.legend(fontsize=10)
-    ax_loss.grid(True)
-    ax_loss.set_ylim(bottom=0)
-    
-    loss_curve_path = os.path.join(output_dir, f'loss_curve_{base_filename}.png')
-    fig_loss.savefig(loss_curve_path, dpi=300, bbox_inches='tight')
-    plt.close(fig_loss)
-    logging.info(f"Saved loss curve to {loss_curve_path}")
+    if train_losses and val_losses:
+        fig_loss, ax_loss = plt.subplots(figsize=(12, 8))
+        ax_loss.plot(train_losses, label='Train Loss', color='royalblue', linewidth=2.5)
+        ax_loss.plot(val_losses, label='Validation Loss', color='darkorange', linewidth=2.5)
+        ax_loss.set_xlabel('Epoch', fontsize=28, fontweight='bold')
+        ax_loss.set_ylabel('Loss (Scaled MSE)', fontsize=28, fontweight='bold')
+        ax_loss.set_title(f'Training & Validation Loss Curve', fontsize=32)
+        ax_loss.legend(fontsize=24)
+        ax_loss.tick_params(axis='both', which='major', labelsize=24)
+        ax_loss.grid(True, linestyle='--', alpha=0.6)
+        ax_loss.set_ylim(bottom=0)
+        
+        loss_curve_path = os.path.join(output_dir, f'loss_curve_{base_filename}.png')
+        fig_loss.savefig(loss_curve_path, dpi=300, bbox_inches='tight')
+        plt.close(fig_loss)
+        logging.info(f"Saved loss curve to {loss_curve_path}")
+    else:
+        logging.info("Loss history not provided, skipping loss curve plot.")
 
     if pred_original.size == 0 or actual_original.size == 0 or pred_original.shape != actual_original.shape:
         logging.warning("No valid data for plotting predictions vs actuals.")
@@ -182,60 +195,57 @@ def plot_results(train_losses: List[float], test_losses: List[float],
         if actual_valid.size == 0:
             logging.warning(f"No valid data to plot for {prop_name}")
             continue
-
-        # ---▼▼▼ 플롯 생성 로직 수정 ▼▼▼---
         
-        # 1. 레이아웃 설정: 2행 1열 구조로 변경
-        fig = plt.figure(figsize=(8, 9), constrained_layout=True)
+        fig = plt.figure(figsize=(12, 13), constrained_layout=True)
         gs = GridSpec(2, 1, figure=fig, height_ratios=[1, 4])
         
         ax_histx = fig.add_subplot(gs[0, 0])
         ax_scatter = fig.add_subplot(gs[1, 0], sharex=ax_histx)
 
-        # 2. 메인 hexbin 플롯
-        # cmap='inferno'는 제공된 이미지와 유사한 색상 맵입니다.
         hb = ax_scatter.hexbin(actual_valid, pred_valid, gridsize=50, cmap='inferno', norm=LogNorm())
-
-        # 3. 색상 막대 (더 작게, 오른쪽에)
-        # shrink와 aspect를 조절하여 크기와 비율을 맞춥니다.
+        
         cbar = fig.colorbar(hb, ax=ax_scatter, shrink=0.8, aspect=30, pad=0.02)
-        cbar.set_label('Density', size=12)
+        cbar.set_label('Density', fontsize=30, labelpad=0)
+        cbar.ax.tick_params(labelsize=24)
+        
+        # --- ▼▼▼ [수정 2/2] 컬러바의 숫자 형식을 정수로 변경합니다 ▼▼▼ ---
+        cbar.ax.yaxis.set_major_formatter(FormatStrFormatter('%d'))
+        # --- ▲▲▲ [수정 완료] ▲▲▲ ---
 
-        # 4. 히스토그램
         ax_histx.hist(actual_valid, bins=50, color='coral', alpha=0.7)
-        plt.setp(ax_histx.get_xticklabels(), visible=False) # 히스토그램의 x축 눈금 숨기기
-        ax_histx.get_yaxis().set_visible(False) # 히스토그램의 y축 숨기기
+        plt.setp(ax_histx.get_xticklabels(), visible=False)
+        ax_histx.get_yaxis().set_visible(False)
 
-        # 5. 레이블 및 제목 변경/제거
-        # 제목 제거 (ax_histx.set_title(...) 호출 안 함)
-        ax_scatter.set_xlabel(f'DFT {prop_name}', fontsize=16) # X축 레이블 변경
-        ax_scatter.set_ylabel(f'LOHCGNN {prop_name}', fontsize=16) # Y축 레이블 변경
+        ax_scatter.set_xlabel(f'DFT {prop_name}', fontsize=36, fontweight='bold', labelpad=20)
+        ax_scatter.set_ylabel(f'LOHCGNN Prediction', fontsize=36, fontweight='bold', labelpad=20)
+        ax_scatter.tick_params(axis='both', which='major', labelsize=30)
 
-        # 6. y=x 선 및 범위 설정
+        if 'energy' in prop_name.lower():
+            ax_scatter.xaxis.set_major_locator(MaxNLocator(nbins=5, prune='both'))
+
         min_val = min(np.min(actual_valid), np.min(pred_valid))
         max_val = max(np.max(actual_valid), np.max(pred_valid))
         padding = (max_val - min_val) * 0.05
         plot_min = min_val - padding
         plot_max = max_val + padding
         
-        # y=x 선 (범례 없이)
-        ax_scatter.plot([plot_min, plot_max], [plot_min, plot_max], 'w--', lw=1.5)
+        ax_scatter.plot([plot_min, plot_max], [plot_min, plot_max], 'w--', lw=2.0)
         ax_scatter.set_xlim(plot_min, plot_max)
         ax_scatter.set_ylim(plot_min, plot_max)
-        # 범례 제거 (ax_scatter.legend(...) 호출 안 함)
 
-        # 7. MAE와 R2 텍스트 추가 (변경 없음)
         prop_metrics = metrics.get(prop_name, {})
         mae = prop_metrics.get('MAE', np.nan)
         r2 = prop_metrics.get('R2', np.nan)
-        text_str = f'MAE = {mae:.4f}\n$R^2$ = {r2:.3f}'
+        rmse = prop_metrics.get('RMSE', np.nan)
+        
+        text_str = f'R² = {r2:.2f}\nMAE = {mae:.2f}\nRMSE = {rmse:.2f}'
+        
         ax_scatter.text(0.05, 0.95, text_str, transform=ax_scatter.transAxes,
-                        fontsize=12, verticalalignment='top',
-                        bbox=dict(boxstyle='round,pad=0.5', fc='wheat', alpha=0.8))
+                        fontsize=30, verticalalignment='top',
+                        bbox=dict(boxstyle='round,pad=0.5', fc='wheat', alpha=0.9,
+                                  edgecolor='black', linewidth=1.5))
 
-        # 8. 이미지 저장
         scatter_path = os.path.join(output_dir, f'{prop_name}_density_scatter_{base_filename}.png')
         fig.savefig(scatter_path, dpi=300, bbox_inches='tight')
         plt.close(fig)
         logging.info(f"Saved density scatter plot for {prop_name} to {scatter_path}")
-        # ---▲▲▲ 플롯 생성 로직 수정 종료 ▲▲▲---

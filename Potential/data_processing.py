@@ -1,14 +1,11 @@
 import pandas as pd
 from rdkit import Chem
-from rdkit.Chem import rdMolDescriptors, Crippen, AllChem, Lipinski
-from rdkit.Chem.rdmolops import GetSSSR
+from rdkit.Chem import rdMolDescriptors, Crippen, AllChem
 import torch
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from typing import List, Optional, Tuple, Set
-from collections import deque
 import numpy as np
-import os
 import logging
 import traceback
 
@@ -17,18 +14,12 @@ try:
         DATA_FILE_PATH, DEHYDRO_SMILES_COL, HYDRO_SMILES_COL, LABEL_COLS
     )
     from feature_configs import (
-        DIRECT_HETEROATOMS_LIST, DIRECT_HETEROATOMS_IDX, NUM_DIRECT_HETERO_FEATURES,
-        NEIGHBOR_ATOM_SYMBOLS, NEIGHBOR_ATOM_IDX, NUM_NEIGHBOR_FEATURES,
-        HETEROATOMS_N, HETEROATOMS_O, HETEROATOMS_S, HETEROATOMS_B, MAX_HETERO_DIST,
+        DIRECT_HETEROATOMS_IDX, NUM_DIRECT_HETERO_FEATURES,
         FUNCTIONAL_GROUP_PATTERNS, FUNCTIONAL_GROUP_SMARTS,
-        IMPORTANT_MOTIFS_PATTERNS,
         ATOM_FEATURE_MAX_BASIC_DIST_DIRECT_FUNCATOM,
-        NEIGHBOR_FEATURE_MAX,
         MOL_DESCRIPTOR_MAX_VALUES,
         TOTAL_FEATURE_DIMENSION,
-        BOND_FEATURE_MAX,
         NUM_BOND_FEATURES,
-        LINE_EDGE_FEATURE_MAX,
         NUM_LINE_EDGE_FEATURES
     )
 except ImportError as e:
@@ -39,7 +30,7 @@ _feature_min_values: Optional[torch.Tensor] = None
 _feature_max_values: Optional[torch.Tensor] = None
 _feature_dimension_initialized: Optional[int] = None
 
-PairedDataTuple = Tuple[Data, Data]  # (atom graph, line graph)
+PairedDataTuple = Tuple[Data, Data]
 
 def initialize_feature_scaling(expected_feature_dim: int = TOTAL_FEATURE_DIMENSION):
     global _feature_min_values, _feature_max_values, _feature_dimension_initialized
@@ -48,30 +39,12 @@ def initialize_feature_scaling(expected_feature_dim: int = TOTAL_FEATURE_DIMENSI
     
     constructed_max_values = torch.cat([
         ATOM_FEATURE_MAX_BASIC_DIST_DIRECT_FUNCATOM,
-        NEIGHBOR_FEATURE_MAX,
         MOL_DESCRIPTOR_MAX_VALUES
     ])
     if constructed_max_values.shape[0] != expected_feature_dim:
         logging.error("Feature dimension mismatch in initialize_feature_scaling.")
         raise ValueError("Feature dimension mismatch.")
     _feature_max_values = constructed_max_values
-
-def get_shortest_distance_to_heteroatom(mol: Chem.Mol, start_atom_idx: int, target_atom_set: set, max_dist: float = MAX_HETERO_DIST) -> float:
-    if mol.GetAtomWithIdx(start_atom_idx).GetAtomicNum() in target_atom_set:
-        return 0.0
-    queue = deque([(start_atom_idx, 0)])
-    visited = {start_atom_idx}
-    while queue:
-        current_idx, distance = queue.popleft()
-        if distance < max_dist:
-            for neighbor in mol.GetAtomWithIdx(current_idx).GetNeighbors():
-                neighbor_idx = neighbor.GetIdx()
-                if neighbor_idx not in visited:
-                    if neighbor.GetAtomicNum() in target_atom_set:
-                        return float(distance + 1)
-                    visited.add(neighbor_idx)
-                    queue.append((neighbor_idx, distance + 1))
-    return float(max_dist)
 
 def smiles_to_graph_data(smiles: str, labels: list) -> Optional[Tuple[Data, Data]]:
     if _feature_min_values is None or _feature_max_values is None or _feature_dimension_initialized is None:
@@ -88,34 +61,19 @@ def smiles_to_graph_data(smiles: str, labels: list) -> Optional[Tuple[Data, Data
         logging.warning(f"Empty molecule for SMILES: {smiles}")
         return None
     
-    try:
-        AllChem.ComputeGasteigerCharges(mol)
-    except Exception as e:
-        logging.warning(f"Failed to compute Gasteiger charges for SMILES {smiles}: {str(e)}")
-        for atom in mol.GetAtoms():
-            atom.SetDoubleProp('_GasteigerCharge', 0.0)
-    
-    num_aromatic_rings = float(rdMolDescriptors.CalcNumAromaticRings(mol))
-    ring_atoms_count = {7: 0.0, 8: 0.0, 16: 0.0, 5: 0.0}
-    for ring in Chem.GetSymmSSSR(mol):
-        for atom_idx in ring:
-            atomic_num = mol.GetAtomWithIdx(atom_idx).GetAtomicNum()
-            if atomic_num in ring_atoms_count:
-                ring_atoms_count[atomic_num] += 1.0
-
     functional_groups_count = {}
     for group, pattern in FUNCTIONAL_GROUP_PATTERNS.items():
         functional_groups_count[group] = float(len(mol.GetSubstructMatches(pattern))) if pattern else 0.0
 
     descriptor_calculators = {
-        "MolLogP": Crippen.MolLogP, "MolMR": Crippen.MolMR,
+        "MolMR": Crippen.MolMR,
         "NumRotatableBonds": rdMolDescriptors.CalcNumRotatableBonds,
         "NumHBD": rdMolDescriptors.CalcNumHBD, "NumHBA": rdMolDescriptors.CalcNumHBA,
-        "LipCleinskiHAcceptors": Lipinski.NumHAcceptors, "LipinskiHDonors": Lipinski.NumHDonors,
         "NumRings": rdMolDescriptors.CalcNumRings,
-        "NumAliphaticRings": rdMolDescriptors.CalcNumAliphaticRings,
-        "FractionCSP3": rdMolDescriptors.CalcFractionCSP3, "TPSA": rdMolDescriptors.CalcTPSA,
+        "FractionCSP3": rdMolDescriptors.CalcFractionCSP3,
+        "TPSA": rdMolDescriptors.CalcTPSA,
     }
+    
     additional_descriptors = []
     for name, func in descriptor_calculators.items():
         try:
@@ -124,48 +82,24 @@ def smiles_to_graph_data(smiles: str, labels: list) -> Optional[Tuple[Data, Data
             logging.warning(f"Failed to compute {name} for SMILES {smiles}: {str(e)}")
             val = 0.0
         additional_descriptors.append(0.0 if pd.isna(val) else val)
-    additional_descriptors.extend([
-        float(mol.GetNumAtoms()), float(mol.GetNumHeavyAtoms()), float(mol.GetNumBonds())
-    ])
     
-    mol_descriptor_list = [
-        num_aromatic_rings, ring_atoms_count[7], ring_atoms_count[8],
-        ring_atoms_count[16], ring_atoms_count[5]
-    ]
+    mol_descriptor_list = []
     for group in FUNCTIONAL_GROUP_SMARTS.keys():
         mol_descriptor_list.append(functional_groups_count.get(group, 0.0))
     mol_descriptor_list.extend(additional_descriptors)
-    for motif in IMPORTANT_MOTIFS_PATTERNS.keys():
-        motif_count = float(len(mol.GetSubstructMatches(IMPORTANT_MOTIFS_PATTERNS[motif]))) if IMPORTANT_MOTIFS_PATTERNS[motif] else 0.0
-        mol_descriptor_list.append(motif_count)
     
     mol_descriptor_tensor = torch.tensor([mol_descriptor_list], dtype=torch.float)
     mol_descriptor_tensor_repeated = mol_descriptor_tensor.repeat(num_atoms, 1)
     
     atom_features = []
-    neighbor_features = []
-    func_group_matches = {
-        group: mol.GetSubstructMatches(pattern) if pattern else [] 
-        for group, pattern in FUNCTIONAL_GROUP_PATTERNS.items()
-    }
     for atom_idx in range(num_atoms):
         atom = mol.GetAtomWithIdx(atom_idx)
+        # --- ▼▼▼ [수정됨] Atom in Ring 피처 생성 코드 제거 ▼▼▼ ---
         basic = [
-            float(atom.GetAtomicNum()), float(atom.GetDegree()), float(atom.GetTotalValence()),
-            float(atom.GetIsAromatic()), float(atom.GetFormalCharge()),
-            float(atom.GetChiralTag()), float(atom.GetTotalNumHs()), float(atom.GetHybridization()),
-            float(atom.IsInRing()), atom.GetMass() * 0.01
+            float(atom.GetIsAromatic()),
+            float(atom.GetTotalNumHs()),
         ]
-        try: charge = float(atom.GetProp('_GasteigerCharge'))
-        except Exception: charge = 0.0
-        basic.append(0.0 if pd.isna(charge) else charge)
-        
-        dist_features = [
-            get_shortest_distance_to_heteroatom(mol, atom_idx, HETEROATOMS_N),
-            get_shortest_distance_to_heteroatom(mol, atom_idx, HETEROATOMS_O),
-            get_shortest_distance_to_heteroatom(mol, atom_idx, HETEROATOMS_S),
-            get_shortest_distance_to_heteroatom(mol, atom_idx, HETEROATOMS_B)
-        ]
+        # --- ▲▲▲ [수정 완료] ▲▲▲ ---
         
         direct_hetero = [0.0] * NUM_DIRECT_HETERO_FEATURES
         for neighbor_atom in atom.GetNeighbors():
@@ -173,24 +107,11 @@ def smiles_to_graph_data(smiles: str, labels: list) -> Optional[Tuple[Data, Data
             if natomic in DIRECT_HETEROATOMS_IDX:
                 direct_hetero[DIRECT_HETEROATOMS_IDX[natomic]] += 1.0
         
-        func_group_flags = [
-            1.0 if any(atom_idx in match for match in func_group_matches[group]) else 0.0
-            for group in FUNCTIONAL_GROUP_SMARTS.keys()
-        ]
-        
-        atom_feat = basic + dist_features + direct_hetero + func_group_flags
+        atom_feat = basic + direct_hetero
         atom_features.append(atom_feat)
         
-        neighbor_count = [0.0] * NUM_NEIGHBOR_FEATURES
-        for neighbor_atom in atom.GetNeighbors():
-            natomic = neighbor_atom.GetAtomicNum()
-            if natomic in NEIGHBOR_ATOM_IDX:
-                neighbor_count[NEIGHBOR_ATOM_IDX[natomic]] += 1.0
-        neighbor_features.append(neighbor_count)
-    
     x_atom = torch.tensor(atom_features, dtype=torch.float)
-    x_neighbor = torch.tensor(neighbor_features, dtype=torch.float)
-    x_combined = torch.cat([x_atom, x_neighbor, mol_descriptor_tensor_repeated], dim=1)
+    x_combined = torch.cat([x_atom, mol_descriptor_tensor_repeated], dim=1)
     
     feature_range = _feature_max_values - _feature_min_values
     feature_range[feature_range == 0] = 1e-6
@@ -216,7 +137,6 @@ def smiles_to_graph_data(smiles: str, labels: list) -> Optional[Tuple[Data, Data
         edge_index = torch.empty((2, 0), dtype=torch.long)
         edge_attr = torch.empty((0, NUM_BOND_FEATURES), dtype=torch.float)
     
-    # Create line graph
     line_edge_indices = []
     line_edge_attrs = []
     num_edges = edge_index.shape[1] // 2
@@ -376,14 +296,17 @@ def inverse_scale_labels(
 def create_paired_dataloaders(
     all_scaled_data: List[PairedDataTuple],
     train_indices: List[int],
+    val_indices: List[int],
     test_indices: List[int],
     batch_size: int
-) -> Tuple[DataLoader, DataLoader]:
+) -> Tuple[DataLoader, DataLoader, DataLoader]:
     train_data = [all_scaled_data[i] for i in train_indices if i < len(all_scaled_data)]
+    val_data = [all_scaled_data[i] for i in val_indices if i < len(all_scaled_data)]
     test_data = [all_scaled_data[i] for i in test_indices if i < len(all_scaled_data)]
     
     train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, drop_last=False)
+    val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False, drop_last=False)
     test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, drop_last=False)
 
-    logging.info(f"Created data loaders: {len(train_loader.dataset)} train samples, {len(test_loader.dataset)} test samples")
-    return train_loader, test_loader
+    logging.info(f"Created data loaders: {len(train_loader.dataset)} train, {len(val_loader.dataset)} validation, {len(test_loader.dataset)} test samples")
+    return train_loader, val_loader, test_loader

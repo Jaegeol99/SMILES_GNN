@@ -1,3 +1,5 @@
+# --- START OF FILE gnn_model.py ---
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -41,31 +43,41 @@ class LOHCGNN(nn.Module):
             EdgeGatedConv(hidden_dim, hidden_dim, hidden_dim) for _ in range(num_layers)
         ])
 
+        # ---▼▼▼ [수정된 부분] MLP 입력 차원 변경 (hidden_dim * 2 -> hidden_dim * 4) ▼▼▼---
         self.mlp = nn.Sequential(
+            nn.Linear(hidden_dim * 4, hidden_dim * 2), # Atom(H/D) + Line(H/D)
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
             nn.Linear(hidden_dim, num_output_features)
         )
+        # ---▲▲▲ [수정 완료] ▲▲▲---
 
     def forward(self, atom_data: Batch, line_data: Batch) -> torch.Tensor:
+        # Initial Embeddings
         h_h = self.node_embed(atom_data.x)
         e_h = self.edge_embed(atom_data.edge_attr)
-        l_h = self.edge_embed(line_data.x)
+        l_h = self.edge_embed(line_data.x) # Line graph nodes are original edges
         le_h = self.line_edge_embed(line_data.edge_attr)
 
         h_d = self.node_embed(atom_data.x_de)
         e_d = self.edge_embed(atom_data.edge_attr_de)
-        l_d = self.edge_embed(line_data.x_de)
+        l_d = self.edge_embed(line_data.x_de) # Line graph nodes are original edges
         le_d = self.line_edge_embed(line_data.edge_attr_de)
 
+        # GNN Layers
         for atom_conv, line_conv in zip(self.atom_conv_layers, self.line_conv_layers):
+            # Update line graphs first
             l_h_update, le_h_update = line_conv(l_h, line_data.edge_index, le_h)
             l_d_update, le_d_update = line_conv(l_d, line_data.edge_index_de, le_d)
             
+            # Update atom graphs
             h_h_update, e_h_update = atom_conv(h_h, atom_data.edge_index, e_h)
             h_d_update, e_d_update = atom_conv(h_d, atom_data.edge_index_de, e_d)
 
+            # Residual connections
             h_h = h_h + h_h_update
             e_h = e_h + e_h_update
             l_h = l_h + l_h_update
@@ -76,7 +88,17 @@ class LOHCGNN(nn.Module):
             l_d = l_d + l_d_update
             le_d = le_d + le_d_update
 
-        h_h = global_mean_pool(h_h, atom_data.batch)
-        h_d = global_mean_pool(h_d, atom_data.batch_de)
-        combined = torch.cat([h_h, h_d], dim=-1)
+        # ---▼▼▼ [수정된 부분] Global Pooling 및 최종 예측 ▼▼▼---
+        # Pool atom graph node features
+        h_h_pooled = global_mean_pool(h_h, atom_data.batch)
+        h_d_pooled = global_mean_pool(h_d, atom_data.batch_de)
+        
+        # Pool line graph node features (which represent original edges)
+        l_h_pooled = global_mean_pool(l_h, line_data.batch)
+        l_d_pooled = global_mean_pool(l_d, line_data.batch_de)
+
+        # Concatenate all four graph representations
+        combined = torch.cat([h_h_pooled, h_d_pooled, l_h_pooled, l_d_pooled], dim=-1)
+        
         return self.mlp(combined)
+        # ---▲▲▲ [수정 완료] ▲▲▲---

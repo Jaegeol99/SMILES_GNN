@@ -7,7 +7,7 @@ DATA_FILE_PATH: str = 'lohc_data.xlsx'
 DEHYDRO_SMILES_COL: str = 'Dehydrogenated_SMILES'
 HYDRO_SMILES_COL: str = 'Hydrogenated_SMILES'
 LABEL_COLS: List[str] = ['Dehydrogenated_energy', 'Hydrogenated_energy', 'Potential','Capacity']
-PROPERTY_NAMES: List[str] = ['Dehydrogenated energy', 'Hydrogenated energy', 'Potential','Capacity']
+PROPERTY_NAMES: List[str] = ['Dehydrogenated energy', 'Hydrogenated energy', 'Standard oxidation potential','Capacity']
 MODEL_SAVE_PATH: str = 'lohc_model.pth'
 LABEL_SCALING_PARAMS_PATH: str = 'lohc_scaler.npz'
 
@@ -19,7 +19,7 @@ LOG_FORMAT: str = '%(asctime)s - %(levelname)s - %(message)s'
 HYPERPARAMS: Dict[str, Any] = {
     'batch_size': 32,
     'learning_rate': 0.001,
-    'epochs': 5,
+    'epochs': 200,
     'hidden_dim': 128,
     'num_layers': 4,
     'dropout_rate': 0.5,
@@ -30,7 +30,7 @@ HYPERPARAMS: Dict[str, Any] = {
 
 # SHAP configuration for model interpretation
 SHAP_CONFIG: Dict[str, Any] = {
-    'max_samples': 150,
-    'nsamples': 100,
-    'max_display_features': 40
+    'max_samples': 500,
+    'nsamples': 500,
+    'max_display_features': 10
 }

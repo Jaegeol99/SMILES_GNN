@@ -31,11 +31,22 @@ def main():
         return
 
     indices = list(range(len(paired_data_list)))
-    train_indices, test_indices = train_test_split(
+    
+    # 데이터를 80% 훈련, 20% 임시 세트로 분할
+    train_indices, temp_indices = train_test_split(
         indices,
-        test_size=HYPERPARAMS['test_split_ratio'],
+        test_size=HYPERPARAMS['test_split_ratio'],  # 0.2
         random_state=HYPERPARAMS['random_state']
     )
+    
+    # 임시 세트를 50% 검증, 50% 테스트 세트로 분할 (전체의 10%씩)
+    val_indices, test_indices = train_test_split(
+        temp_indices,
+        test_size=0.5,  # 0.2 * 0.5 = 0.1
+        random_state=HYPERPARAMS['random_state']
+    )
+
+    logging.info(f"Data split: {len(train_indices)} train, {len(val_indices)} validation, {len(test_indices)} test samples.")
 
     label_min_values, label_max_values = calculate_label_scaling_params(
         paired_data_list, train_indices
@@ -45,8 +56,8 @@ def main():
         np.savez(LABEL_SCALING_PARAMS_PATH, min_vals=label_min_values, max_vals=label_max_values)
         apply_label_scaling(paired_data_list, label_min_values, label_max_values)
 
-    train_loader, test_loader = create_paired_dataloaders(
-        paired_data_list, train_indices, test_indices, HYPERPARAMS['batch_size']
+    train_loader, val_loader, test_loader = create_paired_dataloaders(
+        paired_data_list, train_indices, val_indices, test_indices, HYPERPARAMS['batch_size']
     )
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -65,26 +76,28 @@ def main():
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=HYPERPARAMS['learning_rate'])
 
-    best_test_loss = float('inf')
+    best_val_loss = float('inf')
     train_losses_history = []
-    test_losses_history = []
+    val_losses_history = []
 
     for epoch in range(HYPERPARAMS['epochs']):
         train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
-        test_loss, _, _, _ = evaluate_epoch(model, test_loader, criterion, device)
+        val_loss, _, _, _ = evaluate_epoch(model, val_loader, criterion, device)
 
-        logging.info(f"Epoch {epoch+1}/{HYPERPARAMS['epochs']}: Train Loss = {train_loss:.4f}, Test Loss = {test_loss:.4f}")
+        logging.info(f"Epoch {epoch+1}/{HYPERPARAMS['epochs']}: Train Loss = {train_loss:.4f}, Validation Loss = {val_loss:.4f}")
         train_losses_history.append(train_loss)
-        test_losses_history.append(test_loss)
+        val_losses_history.append(val_loss)
 
-        if test_loss < best_test_loss:
-            best_test_loss = test_loss
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
             torch.save(model.state_dict(), MODEL_SAVE_PATH)
-            logging.info(f"Saved best model with test loss: {best_test_loss:.4f}")
+            logging.info(f"Saved best model with validation loss: {best_val_loss:.4f}")
 
     if len(test_loader.dataset) > 0:
         model.load_state_dict(torch.load(MODEL_SAVE_PATH, map_location=device))
-        logging.info("Loaded best model for final evaluation")
+        logging.info("Loaded best model for final evaluation on the test set")
+        
+        # 최종 평가는 테스트 세트로 수행
         _, predictions_scaled, actual_values_scaled, _ = evaluate_epoch(
             model, test_loader, criterion, device
         )
@@ -104,7 +117,7 @@ def main():
 
             plot_results(
                 train_losses_history,
-                test_losses_history,
+                val_losses_history,
                 actual_values_original,
                 predictions_original,
                 PROPERTY_NAMES,
@@ -113,7 +126,7 @@ def main():
             )
             logging.info("Evaluation and plotting completed.")
         else:
-            logging.warning("No predictions or actual values to evaluate.")
+            logging.warning("No predictions or actual values to evaluate on the test set.")
     else:
         logging.warning("Test dataset is empty.")
 

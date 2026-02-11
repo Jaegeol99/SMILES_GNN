@@ -1,312 +1,129 @@
 import pandas as pd
 from rdkit import Chem
-from rdkit.Chem import rdMolDescriptors, Crippen, AllChem
+from rdkit.Chem import AllChem
 import torch
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
-from typing import List, Optional, Tuple, Set
+from typing import List, Optional, Tuple
 import numpy as np
 import logging
-import traceback
+from config import DATA_FILE_PATH, DEHYDRO_SMILES_COL, HYDRO_SMILES_COL, LABEL_COLS
+from feature_configs import *
 
-try:
-    from config import (
-        DATA_FILE_PATH, DEHYDRO_SMILES_COL, HYDRO_SMILES_COL, LABEL_COLS
-    )
-    from feature_configs import (
-        DIRECT_HETEROATOMS_IDX, NUM_DIRECT_HETERO_FEATURES,
-        FUNCTIONAL_GROUP_PATTERNS, FUNCTIONAL_GROUP_SMARTS,
-        ATOM_FEATURE_MAX_BASIC_DIST_DIRECT_FUNCATOM,
-        MOL_DESCRIPTOR_MAX_VALUES,
-        TOTAL_FEATURE_DIMENSION,
-        NUM_BOND_FEATURES,
-        NUM_LINE_EDGE_FEATURES
-    )
-except ImportError as e:
-    logging.error(f"Failed to import configurations: {str(e)}")
-    raise e
-
-_feature_min_values: Optional[torch.Tensor] = None
-_feature_max_values: Optional[torch.Tensor] = None
-_feature_dimension_initialized: Optional[int] = None
-
-PairedDataTuple = Tuple[Data, Data]
-
-def initialize_feature_scaling(expected_feature_dim: int = TOTAL_FEATURE_DIMENSION):
-    global _feature_min_values, _feature_max_values, _feature_dimension_initialized
-    _feature_dimension_initialized = expected_feature_dim
-    _feature_min_values = torch.zeros(expected_feature_dim, dtype=torch.float)
-    
-    constructed_max_values = torch.cat([
-        ATOM_FEATURE_MAX_BASIC_DIST_DIRECT_FUNCATOM,
-        MOL_DESCRIPTOR_MAX_VALUES
-    ])
-    if constructed_max_values.shape[0] != expected_feature_dim:
-        logging.error("Feature dimension mismatch in initialize_feature_scaling.")
-        raise ValueError("Feature dimension mismatch.")
-    _feature_max_values = constructed_max_values
+_feature_min_values = torch.zeros(TOTAL_FEATURE_DIMENSION)
+_feature_max_values = ATOM_FEATURE_MAX_VALUES
 
 def smiles_to_graph_data(smiles: str, labels: list) -> Optional[Tuple[Data, Data]]:
-    if _feature_min_values is None or _feature_max_values is None or _feature_dimension_initialized is None:
-        logging.warning("Feature scaling not initialized.")
-        return None
-    
     mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        logging.warning(f"Invalid SMILES string: {smiles}")
-        return None
-    
+    if mol is None: return None
     num_atoms = mol.GetNumAtoms()
-    if num_atoms == 0:
-        logging.warning(f"Empty molecule for SMILES: {smiles}")
-        return None
+    if num_atoms == 0: return None
     
-    functional_groups_count = {}
-    for group, pattern in FUNCTIONAL_GROUP_PATTERNS.items():
-        functional_groups_count[group] = float(len(mol.GetSubstructMatches(pattern))) if pattern else 0.0
+    try: AllChem.ComputeGasteigerCharges(mol)
+    except: 
+        for atom in mol.GetAtoms(): atom.SetDoubleProp('_GasteigerCharge', 0.0)
+    
+    func_group_matches = {gn: {idx for match in mol.GetSubstructMatches(pat) for idx in match} 
+                          for gn, pat in FUNCTIONAL_GROUP_PATTERNS.items()}
 
-    descriptor_calculators = {
-        "MolMR": Crippen.MolMR,
-        "NumRotatableBonds": rdMolDescriptors.CalcNumRotatableBonds,
-        "NumHBD": rdMolDescriptors.CalcNumHBD, "NumHBA": rdMolDescriptors.CalcNumHBA,
-        "NumRings": rdMolDescriptors.CalcNumRings,
-        "FractionCSP3": rdMolDescriptors.CalcFractionCSP3,
-        "TPSA": rdMolDescriptors.CalcTPSA,
-    }
-    
-    additional_descriptors = []
-    for name, func in descriptor_calculators.items():
-        try:
-            val = float(func(mol))
-        except Exception as e: 
-            logging.warning(f"Failed to compute {name} for SMILES {smiles}: {str(e)}")
-            val = 0.0
-        additional_descriptors.append(0.0 if pd.isna(val) else val)
-    
-    mol_descriptor_list = []
-    for group in FUNCTIONAL_GROUP_SMARTS.keys():
-        mol_descriptor_list.append(functional_groups_count.get(group, 0.0))
-    mol_descriptor_list.extend(additional_descriptors)
-    
-    mol_descriptor_tensor = torch.tensor([mol_descriptor_list], dtype=torch.float)
-    mol_descriptor_tensor_repeated = mol_descriptor_tensor.repeat(num_atoms, 1)
-    
+    # 1. Atom Features
     atom_features = []
-    for atom_idx in range(num_atoms):
-        atom = mol.GetAtomWithIdx(atom_idx)
-        # --- ▼▼▼ [수정됨] Atom in Ring 피처 생성 코드 제거 ▼▼▼ ---
-        basic = [
-            float(atom.GetIsAromatic()),
-            float(atom.GetTotalNumHs()),
-        ]
-        # --- ▲▲▲ [수정 완료] ▲▲▲ ---
-        
-        direct_hetero = [0.0] * NUM_DIRECT_HETERO_FEATURES
-        for neighbor_atom in atom.GetNeighbors():
-            natomic = neighbor_atom.GetAtomicNum()
-            if natomic in DIRECT_HETEROATOMS_IDX:
-                direct_hetero[DIRECT_HETEROATOMS_IDX[natomic]] += 1.0
-        
-        atom_feat = basic + direct_hetero
-        atom_features.append(atom_feat)
-        
+    for i in range(num_atoms):
+        atom = mol.GetAtomWithIdx(i)
+        g_charge = float(atom.GetProp('_GasteigerCharge')) if atom.HasProp('_GasteigerCharge') else 0.0
+        basic = [float(atom.GetAtomicNum()), float(atom.GetHybridization()), float(atom.GetIsAromatic()), 
+                 float(atom.GetTotalNumHs()), float(atom.GetFormalCharge()), g_charge, float(atom.GetDegree()), float(atom.IsInRing())]
+        neighbors = [0.0] * NUM_NEIGHBOR_FEATURES
+        for n in atom.GetNeighbors():
+            if n.GetAtomicNum() in NEIGHBOR_ATOMS_IDX: neighbors[NEIGHBOR_ATOMS_IDX[n.GetAtomicNum()]] += 1.0
+        funcs = [1.0 if i in func_group_matches[gn] else 0.0 for gn in FUNCTIONAL_GROUP_PATTERNS.keys()]
+        atom_features.append(basic + neighbors + funcs)
+    
     x_atom = torch.tensor(atom_features, dtype=torch.float)
-    x_combined = torch.cat([x_atom, mol_descriptor_tensor_repeated], dim=1)
-    
-    feature_range = _feature_max_values - _feature_min_values
-    feature_range[feature_range == 0] = 1e-6
-    x_scaled = torch.clamp((x_combined - _feature_min_values) / feature_range, 0.0, 1.0)
-    
-    edge_indices = []
-    edge_attrs = []
+    x_scaled = torch.clamp(x_atom / ATOM_FEATURE_MAX_VALUES, 0.0, 1.0)
+
+    # 2. Directed Edges for D-MPNN (Line Graph Nodes)
+    directed_edges = []
+    edge_features = []
+    atom_edge_index = []
+    atom_edge_attr = []
+
     for bond in mol.GetBonds():
-        i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
-        bond_type = bond.GetBondType()
-        bond_feat = [
-            float(bond_type == Chem.rdchem.BondType.SINGLE), float(bond_type == Chem.rdchem.BondType.DOUBLE),
-            float(bond_type == Chem.rdchem.BondType.TRIPLE), float(bond_type == Chem.rdchem.BondType.AROMATIC),
-            float(bond.GetIsConjugated()), float(bond.IsInRing()), float(bond.GetStereo())
-        ]
-        edge_indices.extend([[i, j], [j, i]])
-        edge_attrs.extend([bond_feat, bond_feat])
-    
-    if edge_indices:
-        edge_index = torch.tensor(edge_indices, dtype=torch.long).t().contiguous()
-        edge_attr = torch.tensor(edge_attrs, dtype=torch.float)
-    else:
-        edge_index = torch.empty((2, 0), dtype=torch.long)
-        edge_attr = torch.empty((0, NUM_BOND_FEATURES), dtype=torch.float)
-    
-    line_edge_indices = []
-    line_edge_attrs = []
-    num_edges = edge_index.shape[1] // 2
-    for i in range(0, len(edge_indices), 2):
-        u1, v1 = edge_indices[i]
-        for j in range(i + 2, len(edge_indices), 2):
-            u2, v2 = edge_indices[j]
-            if v1 == u2 or v1 == v2 or u1 == u2 or u1 == v2:
-                line_edge_indices.extend([[i // 2, j // 2], [j // 2, i // 2]])
-                line_edge_attrs.extend([[1.0], [1.0]])
-            else:
-                line_edge_indices.extend([[i // 2, j // 2], [j // 2, i // 2]])
-                line_edge_attrs.extend([[0.0], [0.0]])
-    
-    if line_edge_indices:
-        line_edge_index = torch.tensor(line_edge_indices, dtype=torch.long).t().contiguous()
-        line_edge_attr = torch.tensor(line_edge_attrs, dtype=torch.float)
-    else:
-        line_edge_index = torch.empty((2, 0), dtype=torch.long)
-        line_edge_attr = torch.empty((0, NUM_LINE_EDGE_FEATURES), dtype=torch.float)
-    
-    y = torch.tensor([labels], dtype=torch.float)
-    atom_graph = Data(x=x_scaled, edge_index=edge_index, edge_attr=edge_attr, y=y)
-    line_graph = Data(x=edge_attr[::2], edge_index=line_edge_index, edge_attr=line_edge_attr, y=y)
-    
-    return atom_graph, line_graph
-
-def load_and_preprocess_paired_data(
-    data_path: str = DATA_FILE_PATH,
-    smiles_de_col: str = DEHYDRO_SMILES_COL,
-    smiles_hy_col: str = HYDRO_SMILES_COL,
-    label_cols: List[str] = LABEL_COLS
-) -> Tuple[List[PairedDataTuple], int]:
-    try:
-        df = pd.read_excel(data_path)
-        logging.info(f"Successfully loaded data from {data_path}, shape: {df.shape}")
-    except FileNotFoundError as e:
-        logging.error(f"Data file not found at {data_path}: {str(e)}")
-        return [], 0
-    except Exception as e:
-        logging.error(f"Error loading data file {data_path}: {str(e)}")
-        traceback.print_exc()
-        return [], 0
-
-    initialize_feature_scaling(TOTAL_FEATURE_DIMENSION)
-    feature_dimension = TOTAL_FEATURE_DIMENSION
-
-    paired_graph_data_list: List[PairedDataTuple] = []
-    
-    for index, row in df.iterrows():
-        smiles_de = row[smiles_de_col]
-        smiles_hy = row[smiles_hy_col]
+        u, v = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+        bt = bond.GetBondType()
+        bond_feat = [float(bt == Chem.rdchem.BondType.SINGLE), float(bt == Chem.rdchem.BondType.DOUBLE),
+                     float(bt == Chem.rdchem.BondType.TRIPLE), float(bt == Chem.rdchem.BondType.AROMATIC),
+                     float(bond.GetIsConjugated()), float(bond.IsInRing())]
         
-        if not (isinstance(smiles_de, str) and smiles_de.strip() and 
-                isinstance(smiles_hy, str) and smiles_hy.strip()):
-            logging.warning(f"Skipping row {index}: Invalid or empty SMILES strings")
-            continue
+        # Atom Graph (Standard)
+        atom_edge_index.extend([[u, v], [v, u]])
+        atom_edge_attr.extend([bond_feat, bond_feat])
+        
+        # Line Graph Nodes (Directed Edges)
+        directed_edges.append((u, v))
+        edge_features.append(bond_feat)
+        directed_edges.append((v, u))
+        edge_features.append(bond_feat)
 
-        try:
-            labels_for_row = [float(x) for x in row[label_cols].tolist()]
-            if any(pd.isna(label) for label in labels_for_row):
-                logging.warning(f"Skipping row {index}: Missing or NaN labels")
-                continue
-        except (ValueError, TypeError) as e:
-            logging.warning(f"Skipping row {index}: Invalid label format - {str(e)}")
-            continue
+    x_line = torch.tensor(edge_features, dtype=torch.float)
+    edge_index = torch.tensor(atom_edge_index, dtype=torch.long).t().contiguous()
+    edge_attr = torch.tensor(atom_edge_attr, dtype=torch.float)
 
-        try:
-            graph_pair_de = smiles_to_graph_data(smiles_de, labels_for_row)
-            if graph_pair_de is None:
-                logging.warning(f"Skipping row {index}: Failed to process dehydrogenated SMILES")
-                continue
-            atom_graph_de, line_graph_de = graph_pair_de
+    # 3. Directed Line Graph Edges (No-backtracking)
+    line_edge_indices, line_edge_attrs = [], []
+    num_directed = len(directed_edges)
+    for i in range(num_directed):
+        u_i, v_i = directed_edges[i]
+        for j in range(num_directed):
+            if i == j: continue
+            u_j, v_j = directed_edges[j]
+            
+            # No-backtracking: i의 끝이 j의 시작이고, j의 끝이 i의 시작이 아닐 때만 연결
+            if v_i == u_j and u_i != v_j:
+                atom = mol.GetAtomWithIdx(v_i)
+                hyb = atom.GetHybridization()
+                hyb_feat = [float(hyb == Chem.rdchem.HybridizationType.SP), 
+                            float(hyb == Chem.rdchem.HybridizationType.SP2), 
+                            float(hyb == Chem.rdchem.HybridizationType.SP3)]
+                le_feat = hyb_feat + edge_features[i][:4] + edge_features[j][:4]
+                line_edge_indices.append([i, j])
+                line_edge_attrs.append(le_feat)
 
-            graph_pair_hy = smiles_to_graph_data(smiles_hy, labels_for_row)
-            if graph_pair_hy is None:
-                logging.warning(f"Skipping row {index}: Failed to process hydrogenated SMILES")
-                continue
-            atom_graph_hy, line_graph_hy = graph_pair_hy
+    line_edge_index = torch.tensor(line_edge_indices, dtype=torch.long).t().contiguous() if line_edge_indices else torch.empty((2, 0), dtype=torch.long)
+    line_edge_attr = torch.tensor(line_edge_attrs, dtype=torch.float) if line_edge_attrs else torch.empty((0, 11), dtype=torch.float)
 
-            paired_graph_data_list.append((
-                (atom_graph_de, line_graph_de),
-                (atom_graph_hy, line_graph_hy)
-            ))
-        except Exception as e:
-            logging.warning(f"Skipping row {index}: Error processing SMILES - {str(e)}")
-            traceback.print_exc()
-            continue
-    
-    logging.info(f"Processed {len(paired_graph_data_list)} paired graph data samples")
-    return paired_graph_data_list, feature_dimension
+    y = torch.tensor([labels], dtype=torch.float)
+    return Data(x=x_scaled, edge_index=edge_index, edge_attr=edge_attr, y=y), \
+           Data(x=x_line, edge_index=line_edge_index, edge_attr=line_edge_attr, y=y)
 
-def calculate_label_scaling_params(
-    paired_data_list: List[PairedDataTuple],
-    train_indices: List[int]
-) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-    if not train_indices or not paired_data_list:
-        logging.warning("No training data provided for label scaling.")
-        return None
+def load_and_preprocess_paired_data():
+    df = pd.read_excel(DATA_FILE_PATH)
+    paired_list = []
+    for _, row in df.iterrows():
+        s_de, s_hy = row[DEHYDRO_SMILES_COL], row[HYDRO_SMILES_COL]
+        if not (isinstance(s_de, str) and isinstance(s_hy, str)): continue
+        labels = [float(x) for x in row[LABEL_COLS].tolist()]
+        if any(pd.isna(l) for l in labels): continue
+        res_de, res_hy = smiles_to_graph_data(s_de, labels), smiles_to_graph_data(s_hy, labels)
+        if res_de and res_hy: paired_list.append((res_de, res_hy))
+    return paired_list, TOTAL_FEATURE_DIMENSION
 
-    train_labels_list = []
-    for i in train_indices:
-        if i < len(paired_data_list) and paired_data_list[i][0][0].y is not None:
-            train_labels_list.append(paired_data_list[i][0][0].y.numpy())
-    
-    if not train_labels_list:
-        logging.warning("No valid labels found for scaling.")
-        return None
+def calculate_label_scaling_params(paired_data_list, train_indices):
+    train_labels = np.concatenate([paired_data_list[i][0][0].y.numpy() for i in train_indices], axis=0)
+    median = np.nanmedian(train_labels, axis=0)
+    q1, q3 = np.nanpercentile(train_labels, [25, 75], axis=0)
+    iqr = np.where((q3 - q1) < 1e-9, 1.0, q3 - q1)
+    return median, iqr
 
-    train_labels_np = np.concatenate(train_labels_list, axis=0)
+def apply_label_scaling(paired_data_list, median, iqr):
+    for (g_de, l_de), (g_hy, l_hy) in paired_data_list:
+        scaled_y = torch.tensor((g_de.y.numpy() - median) / iqr, dtype=torch.float)
+        g_de.y = l_de.y = g_hy.y = l_hy.y = scaled_y
 
-    if np.isnan(train_labels_np).any():
-        logging.warning("NaN values found in labels, computing min/max with nanmin/nanmax.")
-        label_min_values = np.nanmin(train_labels_np, axis=0)
-        label_max_values = np.nanmax(train_labels_np, axis=0)
-    else:
-        label_min_values = train_labels_np.min(axis=0)
-        label_max_values = train_labels_np.max(axis=0)
+def inverse_scale_labels(scaled, median, iqr):
+    return scaled * iqr + median
 
-    label_range = label_max_values - label_min_values
-    label_range[np.abs(label_range) < 1e-9] = 1.0
-
-    logging.info(f"Label scaling parameters - Min: {label_min_values}, Max: {label_max_values}")
-    return label_min_values, label_max_values
-
-def apply_label_scaling(
-    paired_data_list: List[PairedDataTuple],
-    label_min_values: Optional[np.ndarray],
-    label_max_values: Optional[np.ndarray]
-):
-    if label_min_values is None or label_max_values is None:
-        logging.warning("No label scaling parameters provided.")
-        return
-    
-    label_range = label_max_values - label_min_values
-    label_range[np.abs(label_range) < 1e-9] = 1.0
-
-    for (graph_de, line_graph_de), (graph_hy, line_graph_hy) in paired_data_list:
-        if graph_de.y is not None:
-            y_np = graph_de.y.numpy()
-            scaled_y_np = (y_np - label_min_values) / label_range
-            scaled_y_tensor = torch.tensor(scaled_y_np, dtype=torch.float)
-            graph_de.y = scaled_y_tensor
-            graph_hy.y = scaled_y_tensor.clone()
-            line_graph_de.y = scaled_y_tensor.clone()
-            line_graph_hy.y = scaled_y_tensor.clone()
-    logging.info("Label scaling applied to all graph data.")
-
-def inverse_scale_labels(
-    scaled_labels: np.ndarray, min_vals: np.ndarray, max_vals: np.ndarray
-) -> np.ndarray:
-    range_vals = max_vals - min_vals
-    range_vals[np.abs(range_vals) < 1e-9] = 1.0
-    original_labels = scaled_labels * range_vals + min_vals
-    return original_labels
-
-def create_paired_dataloaders(
-    all_scaled_data: List[PairedDataTuple],
-    train_indices: List[int],
-    val_indices: List[int],
-    test_indices: List[int],
-    batch_size: int
-) -> Tuple[DataLoader, DataLoader, DataLoader]:
-    train_data = [all_scaled_data[i] for i in train_indices if i < len(all_scaled_data)]
-    val_data = [all_scaled_data[i] for i in val_indices if i < len(all_scaled_data)]
-    test_data = [all_scaled_data[i] for i in test_indices if i < len(all_scaled_data)]
-    
-    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, drop_last=False)
-    val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False, drop_last=False)
-    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, drop_last=False)
-
-    logging.info(f"Created data loaders: {len(train_loader.dataset)} train, {len(val_loader.dataset)} validation, {len(test_loader.dataset)} test samples")
-    return train_loader, val_loader, test_loader
+def create_paired_dataloaders(all_data, train_idx, val_idx, test_idx, batch_size):
+    return (DataLoader([all_data[i] for i in train_idx], batch_size=batch_size, shuffle=True),
+            DataLoader([all_data[i] for i in val_idx], batch_size=batch_size),
+            DataLoader([all_data[i] for i in test_idx], batch_size=batch_size))

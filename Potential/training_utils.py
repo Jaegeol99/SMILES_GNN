@@ -1,251 +1,107 @@
+# training_utils.py
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch_geometric.loader import DataLoader
-from torch_geometric.data import Batch
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
+from matplotlib.ticker import FormatStrFormatter
 from matplotlib.gridspec import GridSpec
-from matplotlib.ticker import MaxNLocator
-import os
-from typing import List, Tuple, Dict, Any
 from tqdm import tqdm
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
-import logging
-# --- ▼▼▼ [수정 1/2] 숫자 포맷을 변경하기 위해 Formatter를 import 합니다 ▼▼▼ ---
-from matplotlib.ticker import FormatStrFormatter
-# --- ▲▲▲ [수정 완료] ▲▲▲ ---
+import os, logging
 
+def prepare_batch(data_pair, device):
+    (atom_de, line_de), (atom_hy, line_hy) = data_pair
+    ah = atom_hy.to(device)
+    ah.x_de, ah.edge_index_de, ah.edge_attr_de, ah.batch_de = atom_de.x.to(device), atom_de.edge_index.to(device), atom_de.edge_attr.to(device), atom_de.batch.to(device)
+    lh = line_hy.to(device)
+    lh.x_de, lh.edge_index_de, lh.edge_attr_de, lh.batch_de = line_de.x.to(device), line_de.edge_index.to(device), line_de.edge_attr.to(device), line_de.batch.to(device)
+    return ah, lh
 
-# ... train_epoch, evaluate_epoch, evaluate_metrics 함수는 변경 없음 ...
-def train_epoch(model: nn.Module,
-                loader: DataLoader,
-                criterion: nn.Module,
-                optimizer: optim.Optimizer,
-                device: torch.device) -> float:
+def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
-    total_loss = 0.0
-    batch_count = 0
-
-    for data_pair in tqdm(loader, desc="Training", leave=False):
-        if not (isinstance(data_pair, (list, tuple)) and len(data_pair) == 2):
-            logging.warning("Invalid data pair in training batch, skipping.")
-            continue
-        
-        (atom_de, line_de), (atom_hy, line_hy) = data_pair
-        
-        atom_batch = atom_hy.to(device)
-        atom_batch.x_de = atom_de.x.to(device)
-        atom_batch.edge_index_de = atom_de.edge_index.to(device)
-        atom_batch.edge_attr_de = atom_de.edge_attr.to(device)
-        atom_batch.batch_de = atom_de.batch.to(device)
-
-        line_batch = line_hy.to(device)
-        line_batch.x_de = line_de.x.to(device)
-        line_batch.edge_index_de = line_de.edge_index.to(device)
-        line_batch.edge_attr_de = line_de.edge_attr.to(device)
-        line_batch.batch_de = line_de.batch.to(device)
-
+    total_loss = 0
+    for batch in tqdm(loader, desc="Training", leave=False):
+        ah, lh = prepare_batch(batch, device)
         optimizer.zero_grad()
-        output = model(atom_batch, line_batch)
-        target = atom_batch.y.view_as(output)
-        loss = criterion(output, target)
-        loss.backward()
-        optimizer.step()
-
+        out = model(ah, lh)
+        loss = criterion(out, ah.y.view_as(out))
+        loss.backward(); optimizer.step()
         total_loss += loss.item()
-        batch_count += 1
+    return total_loss / len(loader)
 
-    return total_loss / batch_count if batch_count > 0 else 0.0
-
-def evaluate_epoch(model: nn.Module,
-                   loader: DataLoader,
-                   criterion: nn.Module,
-                   device: torch.device) -> Tuple[float, np.ndarray, np.ndarray, List[Any]]:
+def evaluate_epoch(model, loader, criterion, device):
     model.eval()
-    total_loss = 0.0
-    predictions_list, targets_list, identifiers_list = [], [], []
-    batch_count = 0
-
+    total_loss, preds, targs = 0, [], []
     with torch.no_grad():
-        for data_pair in tqdm(loader, desc="Evaluating", leave=False):
-            if not (isinstance(data_pair, (list, tuple)) and len(data_pair) == 2):
-                logging.warning("Invalid data pair in evaluation batch, skipping.")
-                continue
-            
-            (atom_de, line_de), (atom_hy, line_hy) = data_pair
+        for batch in loader:
+            ah, lh = prepare_batch(batch, device)
+            out = model(ah, lh)
+            total_loss += criterion(out, ah.y.view_as(out)).item()
+            preds.append(out.cpu().numpy()); targs.append(ah.y.view_as(out).cpu().numpy())
+    return total_loss / len(loader), np.concatenate(preds), np.concatenate(targs), []
 
-            atom_batch = atom_hy.to(device)
-            atom_batch.x_de = atom_de.x.to(device)
-            atom_batch.edge_index_de = atom_de.edge_index.to(device)
-            atom_batch.edge_attr_de = atom_de.edge_attr.to(device)
-            atom_batch.batch_de = atom_de.batch.to(device)
+def evaluate_metrics(p, a, names):
+    res = {}
+    for i, n in enumerate(names):
+        pi, ai = p[:, i], a[:, i]
+        mask = ~np.isnan(ai)
+        pi, ai = pi[mask], ai[mask]
+        mse = mean_squared_error(ai, pi)
+        res[n] = {'MSE': mse, 'R2': r2_score(ai, pi), 'MAE': mean_absolute_error(ai, pi), 'RMSE': np.sqrt(mse)}
+        logging.info(f"{n} - R2: {res[n]['R2']:.4f}, MAE: {res[n]['MAE']:.4f}")
+    return res
 
-            line_batch = line_hy.to(device)
-            line_batch.x_de = line_de.x.to(device)
-            line_batch.edge_index_de = line_de.edge_index.to(device)
-            line_batch.edge_attr_de = line_de.edge_attr.to(device)
-            line_batch.batch_de = line_de.batch.to(device)
-            
-            num_in_batch = getattr(atom_batch, 'num_graphs', 0)
-            identifiers = [f"Item_{i}" for i in range(num_in_batch)]
-
-            output = model(atom_batch, line_batch)
-            target = atom_batch.y.view_as(output)
-            loss = criterion(output, target)
-            total_loss += loss.item()
-            
-            predictions_list.append(output.cpu().numpy())
-            targets_list.append(target.cpu().numpy())
-            identifiers_list.extend(identifiers)
-            batch_count += 1
-
-    avg_loss = total_loss / batch_count if batch_count > 0 else 0.0
-    predictions = np.concatenate(predictions_list, axis=0) if predictions_list else np.array([])
-    targets = np.concatenate(targets_list, axis=0) if targets_list else np.array([])
-
-    return avg_loss, predictions, targets, identifiers_list
-
-
-def evaluate_metrics(predictions: np.ndarray,
-                     actuals: np.ndarray,
-                     property_names: List[str]) -> Dict[str, Dict[str, float]]:
-    results = {}
-    if predictions.size == 0 or actuals.size == 0 or predictions.shape != actuals.shape:
-        logging.warning("No valid predictions or actual values to evaluate.")
-        return results
-
-    num_properties = predictions.shape[1]
-    property_names_used = property_names if len(property_names) == num_properties \
-                                      else [f"Property_{i}" for i in range(num_properties)]
-
-    for i in range(num_properties):
-        prop_name = property_names_used[i]
-        actual_column = actuals[:, i]
-        pred_column = predictions[:, i]
-        valid_mask = ~np.isnan(actual_column) & ~np.isnan(pred_column)
-        actual_valid = actual_column[valid_mask]
-        pred_valid = pred_column[valid_mask]
-
-        if actual_valid.size < 2:
-            logging.warning(f"Insufficient valid data for property: {prop_name}")
-            results[prop_name] = {'MSE': np.nan, 'R2': np.nan, 'MAE': np.nan, 'RMSE': np.nan}
-            continue
-
-        mse = mean_squared_error(actual_valid, pred_valid)
-        r2 = r2_score(actual_valid, pred_valid)
-        mae = mean_absolute_error(actual_valid, pred_valid)
-        rmse = np.sqrt(mse)
-        results[prop_name] = {'MSE': mse, 'R2': r2, 'MAE': mae, 'RMSE': rmse}
-
-        logging.info(f"Metrics for {prop_name}:")
-        logging.info(f"  R2: {r2:.4f}")
-        logging.info(f"  MAE: {mae:.4f}")
-        logging.info(f"  RMSE: {rmse:.4f}")
-        logging.info(f"  MSE: {mse:.4f}")
-
-
-    return results
-
-def plot_results(train_losses: List[float], val_losses: List[float],
-                 actual_original: np.ndarray, pred_original: np.ndarray,
-                 property_names: List[str],
-                 metrics: Dict[str, Dict[str, float]],
-                 output_dir: str = "."):
+def plot_results(tr_l, val_l, a, p, names, metrics, output_dir="."):
     os.makedirs(output_dir, exist_ok=True)
-    base_filename = "model"
+    
+    # 1. Loss Curve (High Quality)
+    fig_loss, ax_loss = plt.subplots(figsize=(12, 8))
+    ax_loss.plot(tr_l, label='Train Loss', color='royalblue', linewidth=2.5)
+    ax_loss.plot(val_l, label='Validation Loss', color='darkorange', linewidth=2.5)
+    ax_loss.set_xlabel('Epoch', fontsize=28, fontweight='bold')
+    ax_loss.set_ylabel('Loss (Scaled MSE)', fontsize=28, fontweight='bold')
+    ax_loss.legend(fontsize=24); ax_loss.grid(True, linestyle='--', alpha=0.6)
+    plt.savefig(f"{output_dir}/loss_curve.png", dpi=300, bbox_inches='tight'); plt.close()
+    
+    # 2. Scatter Plots (High Quality - Hexbin with Marginal Histograms)
+    for i, n in enumerate(names):
+        actual, pred = a[:, i], p[:, i]
+        mask = ~np.isnan(actual) & ~np.isnan(pred)
+        actual, pred = actual[mask], pred[mask]
+        if len(actual) == 0: continue
 
-    if train_losses and val_losses:
-        fig_loss, ax_loss = plt.subplots(figsize=(12, 8))
-        ax_loss.plot(train_losses, label='Train Loss', color='royalblue', linewidth=2.5)
-        ax_loss.plot(val_losses, label='Validation Loss', color='darkorange', linewidth=2.5)
-        ax_loss.set_xlabel('Epoch', fontsize=28, fontweight='bold')
-        ax_loss.set_ylabel('Loss (Scaled MSE)', fontsize=28, fontweight='bold')
-        ax_loss.set_title(f'Training & Validation Loss Curve', fontsize=32)
-        ax_loss.legend(fontsize=24)
-        ax_loss.tick_params(axis='both', which='major', labelsize=24)
-        ax_loss.grid(True, linestyle='--', alpha=0.6)
-        ax_loss.set_ylim(bottom=0)
-        
-        loss_curve_path = os.path.join(output_dir, f'loss_curve_{base_filename}.png')
-        fig_loss.savefig(loss_curve_path, dpi=300, bbox_inches='tight')
-        plt.close(fig_loss)
-        logging.info(f"Saved loss curve to {loss_curve_path}")
-    else:
-        logging.info("Loss history not provided, skipping loss curve plot.")
-
-    if pred_original.size == 0 or actual_original.size == 0 or pred_original.shape != actual_original.shape:
-        logging.warning("No valid data for plotting predictions vs actuals.")
-        return
-
-    num_properties = pred_original.shape[1]
-    property_names_plot = property_names if len(property_names) == num_properties \
-                                        else [f"Target_{i+1}" for i in range(num_properties)]
-
-    for i in range(num_properties):
-        prop_name = property_names_plot[i]
-        actual = actual_original[:, i]
-        pred = pred_original[:, i]
-
-        valid_mask = ~np.isnan(actual) & ~np.isnan(pred)
-        actual_valid = actual[valid_mask]
-        pred_valid = pred[valid_mask]
-
-        if actual_valid.size == 0:
-            logging.warning(f"No valid data to plot for {prop_name}")
-            continue
-        
         fig = plt.figure(figsize=(12, 13), constrained_layout=True)
         gs = GridSpec(2, 1, figure=fig, height_ratios=[1, 4])
-        
         ax_histx = fig.add_subplot(gs[0, 0])
         ax_scatter = fig.add_subplot(gs[1, 0], sharex=ax_histx)
 
-        hb = ax_scatter.hexbin(actual_valid, pred_valid, gridsize=50, cmap='inferno', norm=LogNorm())
-        
+        # Hexbin plot
+        hb = ax_scatter.hexbin(actual, pred, gridsize=50, cmap='inferno', norm=LogNorm())
         cbar = fig.colorbar(hb, ax=ax_scatter, shrink=0.8, aspect=30, pad=0.02)
-        cbar.set_label('Density', fontsize=30, labelpad=0)
-        cbar.ax.tick_params(labelsize=24)
-        
-        # --- ▼▼▼ [수정 2/2] 컬러바의 숫자 형식을 정수로 변경합니다 ▼▼▼ ---
+        cbar.set_label('Density', fontsize=30); cbar.ax.tick_params(labelsize=24)
         cbar.ax.yaxis.set_major_formatter(FormatStrFormatter('%d'))
-        # --- ▲▲▲ [수정 완료] ▲▲▲ ---
 
-        ax_histx.hist(actual_valid, bins=50, color='coral', alpha=0.7)
-        plt.setp(ax_histx.get_xticklabels(), visible=False)
-        ax_histx.get_yaxis().set_visible(False)
+        # Marginal Histogram
+        ax_histx.hist(actual, bins=50, color='coral', alpha=0.7)
+        plt.setp(ax_histx.get_xticklabels(), visible=False); ax_histx.get_yaxis().set_visible(False)
 
-        ax_scatter.set_xlabel(f'DFT {prop_name}', fontsize=36, fontweight='bold', labelpad=20)
-        ax_scatter.set_ylabel(f'LOHCGNN Prediction', fontsize=36, fontweight='bold', labelpad=20)
+        ax_scatter.set_xlabel(f'DFT {n}', fontsize=36, fontweight='bold', labelpad=20)
+        ax_scatter.set_ylabel(f'Prediction', fontsize=36, fontweight='bold', labelpad=20)
         ax_scatter.tick_params(axis='both', which='major', labelsize=30)
 
-        if 'energy' in prop_name.lower():
-            ax_scatter.xaxis.set_major_locator(MaxNLocator(nbins=5, prune='both'))
+        # y=x line
+        mn, mx = min(actual.min(), pred.min()), max(actual.max(), pred.max())
+        pad = (mx - mn) * 0.05
+        ax_scatter.plot([mn-pad, mx+pad], [mn-pad, mx+pad], 'w--', lw=2.0)
+        ax_scatter.set_xlim(mn-pad, mx+pad); ax_scatter.set_ylim(mn-pad, mx+pad)
 
-        min_val = min(np.min(actual_valid), np.min(pred_valid))
-        max_val = max(np.max(actual_valid), np.max(pred_valid))
-        padding = (max_val - min_val) * 0.05
-        plot_min = min_val - padding
-        plot_max = max_val + padding
-        
-        ax_scatter.plot([plot_min, plot_max], [plot_min, plot_max], 'w--', lw=2.0)
-        ax_scatter.set_xlim(plot_min, plot_max)
-        ax_scatter.set_ylim(plot_min, plot_max)
+        # Metrics Text
+        m = metrics[n]
+        text_str = f"R² = {m['R2']:.3f}\nMAE = {m['MAE']:.2f}\nRMSE = {m['RMSE']:.2f}"
+        ax_scatter.text(0.05, 0.95, text_str, transform=ax_scatter.transAxes, fontsize=30, 
+                        verticalalignment='top', bbox=dict(boxstyle='round,pad=0.5', fc='wheat', alpha=0.9))
 
-        prop_metrics = metrics.get(prop_name, {})
-        mae = prop_metrics.get('MAE', np.nan)
-        r2 = prop_metrics.get('R2', np.nan)
-        rmse = prop_metrics.get('RMSE', np.nan)
-        
-        text_str = f'R² = {r2:.2f}\nMAE = {mae:.2f}\nRMSE = {rmse:.2f}'
-        
-        ax_scatter.text(0.05, 0.95, text_str, transform=ax_scatter.transAxes,
-                        fontsize=30, verticalalignment='top',
-                        bbox=dict(boxstyle='round,pad=0.5', fc='wheat', alpha=0.9,
-                                  edgecolor='black', linewidth=1.5))
-
-        scatter_path = os.path.join(output_dir, f'{prop_name}_density_scatter_{base_filename}.png')
-        fig.savefig(scatter_path, dpi=300, bbox_inches='tight')
-        plt.close(fig)
-        logging.info(f"Saved density scatter plot for {prop_name} to {scatter_path}")
+        safe_name = n.replace(" ", "_")
+        plt.savefig(f"{output_dir}/scatter_{safe_name}.png", dpi=300, bbox_inches='tight'); plt.close()
+        logging.info(f"Saved high-quality scatter plot for {n}")

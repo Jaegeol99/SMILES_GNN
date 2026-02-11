@@ -1,45 +1,44 @@
+# feature_configs.py
 import torch
 from rdkit import Chem
 import logging
-from typing import List, Dict, Set, Any
+from typing import List, Dict, Set
 
-DIRECT_HETEROATOMS_SET: Set[int] = {5, 7, 8, 16}
-DIRECT_HETEROATOMS_LIST: List[int] = sorted(list(DIRECT_HETEROATOMS_SET))
-NUM_DIRECT_HETERO_FEATURES: int = len(DIRECT_HETEROATOMS_LIST)
-DIRECT_HETEROATOMS_IDX: Dict[int, int] = {num: i for i, num in enumerate(DIRECT_HETEROATOMS_LIST)}
+# 1. 이웃 원자 (Neighbors)
+NEIGHBOR_ATOMS_SET: Set[int] = {7, 8, 9, 16, 17} # N, O, F, S, Cl
+NEIGHBOR_ATOMS_LIST: List[int] = sorted(list(NEIGHBOR_ATOMS_SET))
+NUM_NEIGHBOR_FEATURES: int = len(NEIGHBOR_ATOMS_LIST)
+NEIGHBOR_ATOMS_IDX: Dict[int, int] = {num: i for i, num in enumerate(NEIGHBOR_ATOMS_LIST)}
+
+# 2. 핵심 작용기 (Functional Groups) - 총 23개
 FUNCTIONAL_GROUP_SMARTS: Dict[str, str] = {
-    'CH3': '[CX4H3]', 'NH2': '[NX3H2]', 'OH': '[OX2H]', 'F': '[F]',
-    'Cl': '[Cl]', 'COOH': '[CX3](=[OX1])[OX2H1]', 'C=O': '[CX3]=[OX1]',
-    'C-N': '[CX4][NX3]', 'C=N': '[CX3]=[NX2]', 'C#N': '[CX2]#[NX1]'
+    'Nitro': '[N+](=O)[O-]', 'Sulfone': '[#16](=[OX1])(=[OX1])', 'CF3': 'C(F)(F)F', 'C#N': '[CX2]#[NX1]', 'N-C#N': '[#7,n]C#N', 
+    'C=O': '[CX3]=[OX1]', 'Ar-C=O': 'c[CX3]=[OX1]', 'C=N': '[CX3]=[NX2]', 'Ar-C=N': 'c[CX3]=[NX2]', 'O-C=N': '[#8][CX3]=[NX2]', 'N-C=N': '[#7][CX3]=[NX2]', 
+    'Amine_Pri': '[NX3;H2]', 'Amine_Sec': '[NX3;H1]', 'Amine_Tert': '[NX3;H0]', 'Ether': '[OD2]([#6])[#6]', 'OH': '[OX2H]', 'CH3': '[CX4H3]', 
+    'Ar-OH': 'c[OH]', 'Ar-OR': 'c[OD2]', 'Pyridine_N': '[n&D2]', 'Pyrrole_N': '[n&D3]', 'Bridgehead_N': '[n&D3&R2]', 'Multi_N_Ring': '[n]1~[n]~*~*~*~1',
 }
+
 FUNCTIONAL_GROUP_PATTERNS: Dict[str, Chem.Mol] = {}
 for k, v in FUNCTIONAL_GROUP_SMARTS.items():
     pattern = Chem.MolFromSmarts(v)
-    if pattern:
-        FUNCTIONAL_GROUP_PATTERNS[k] = pattern
-    else:
-        logging.warning(f"Could not parse SMARTS for functional group '{k}': {v}")
+    if pattern: FUNCTIONAL_GROUP_PATTERNS[k] = pattern
 NUM_FUNC_GROUPS: int = len(FUNCTIONAL_GROUP_PATTERNS)
 
-ATOM_FEATURE_MAX_BASIC_DIST_DIRECT_FUNCATOM: torch.Tensor = torch.tensor([
-    1, 4, # Aromatic, H Count (Atom in Ring 제거됨)
-    4.0, 4.0, 4.0, 4.0, # Heteroatom coordinations
+# 3. Atom Feature Max Values (36개)
+ATOM_FEATURE_MAX_VALUES: torch.Tensor = torch.tensor([
+    100.0, 10.0, 1.0, 10.0, 5.0, 5.0, 10.0, 1.0, # Basic (8)
+    5.0, 5.0, 5.0, 5.0, 5.0, # Neighbors (5)
+    *[1.0]*23 # Func Groups (23)
 ], dtype=torch.float)
-NUM_ATOM_BASIC_DIST_DIRECT_FUNCATOM: int = ATOM_FEATURE_MAX_BASIC_DIST_DIRECT_FUNCATOM.shape[0]
+NUM_ATOM_FEATURES: int = ATOM_FEATURE_MAX_VALUES.shape[0]
 
-MOL_DESCRIPTOR_MAX_VALUES: torch.Tensor = torch.tensor([
-    10, 10, 10, 10, 10, 10, 10, 10, 10, 10, # Functional Groups
-    150, 20, 15, 15, 10, 1, 200, # MR, RotB, HBD, HBA, Rings, Fsp³, TPSA
-], dtype=torch.float)
-NUM_MOL_DESCRIPTORS_TOTAL: int = MOL_DESCRIPTOR_MAX_VALUES.shape[0]
-
-BOND_FEATURE_MAX: torch.Tensor = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=torch.float)
+# 4. Bond Feature Max Values (6개)
+BOND_FEATURE_MAX: torch.Tensor = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=torch.float)
 NUM_BOND_FEATURES: int = BOND_FEATURE_MAX.shape[0]
 
-LINE_EDGE_FEATURE_MAX: torch.Tensor = torch.tensor([1.0], dtype=torch.float)
-NUM_LINE_EDGE_FEATURES: int = LINE_EDGE_FEATURE_MAX.shape[0]
+# --- ▼▼▼ [수정] 라인 그래프 엣지 특징 차원 (11개) ▼▼▼ ---
+# [sp, sp2, sp3] (3) + [Bond1: S, D, T, A] (4) + [Bond2: S, D, T, A] (4) = 11
+NUM_LINE_EDGE_FEATURES: int = 11
+# --- ▲▲▲ [수정 완료] ▲▲▲ ---
 
-TOTAL_FEATURE_DIMENSION: int = (
-    NUM_ATOM_BASIC_DIST_DIRECT_FUNCATOM +
-    NUM_MOL_DESCRIPTORS_TOTAL
-)
+TOTAL_FEATURE_DIMENSION: int = NUM_ATOM_FEATURES

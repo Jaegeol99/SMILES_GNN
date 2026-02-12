@@ -70,30 +70,30 @@ def smiles_to_graph_data(smiles: str, labels: list) -> Optional[Tuple[Data, Data
         directed_edges.append((v, u))
         edge_features.append(bond_feat)
 
-    # Build line-node feature tensor. If there are no bonds, create an empty
-    # tensor with shape (0, NUM_BOND_FEATURES) to avoid indexing shape[1]
+    # Build line-node feature tensor.
+    # [CHANGED A1/A2/A3] Directed bond node feature:
+    #   x_line(u->v) = concat( x_scaled[u], bond_feat(u,v) )
+    # Also store local src/dst atom indices per directed bond for bond->atom aggregation in the model.
     if len(edge_features) == 0:
-        from feature_configs import LINE_NODE_FEATURE_DIM
         x_line = torch.empty((0, LINE_NODE_FEATURE_DIM), dtype=torch.float)
-        line_scr = torch.empty((0,), dtype=torch.long)
+        line_src = torch.empty((0,), dtype=torch.long)
         line_dst = torch.empty((0,), dtype=torch.long)
     else:
         bond_feat_tensor = torch.tensor(edge_features, dtype=torch.float)
+        # directed_edges is ordered in the same way as edge_features
         line_src = torch.tensor([u for (u, v) in directed_edges], dtype=torch.long)
         line_dst = torch.tensor([v for (u, v) in directed_edges], dtype=torch.long)
 
-        # x_scaled is already scaled atom features; gather source atom features per directed edge
+        # gather source atom features (already scaled)
         src_atom_feat = x_scaled[line_src]  # (num_directed, TOTAL_FEATURE_DIMENSION)
         x_line = torch.cat([src_atom_feat, bond_feat_tensor], dim=1)
 
-        from feature_configs import LINE_NODE_FEATURE_DIM  # local import to avoid circulars
         if x_line.dim() == 1:
             x_line = x_line.unsqueeze(0)
         if x_line.shape[1] != LINE_NODE_FEATURE_DIM:
             raise ValueError(f"Line-node feature dim mismatch: got {x_line.shape[1]}, expected {LINE_NODE_FEATURE_DIM}")
 
-
-    # Atom graph edge_index / edge_attr: ensure well-formed empty tensors when
+# Atom graph edge_index / edge_attr: ensure well-formed empty tensors when
     # there are no bonds
     if len(atom_edge_index) == 0:
         edge_index = torch.empty((2, 0), dtype=torch.long)
@@ -132,9 +132,13 @@ def smiles_to_graph_data(smiles: str, labels: list) -> Optional[Tuple[Data, Data
 
     y = torch.tensor([labels], dtype=torch.float)
     return Data(x=x_scaled, edge_index=edge_index, edge_attr=edge_attr, y=y), \
-           Data(x=x_line, edge_index=line_edge_index, edge_attr=line_edge_attr, y=y)
+           Data(x=x_line, edge_index=line_edge_index, edge_attr=line_edge_attr, y=y, src=line_src, dst=line_dst)
 
 def load_and_preprocess_qm9_data():
+    """
+    QM9에서 SMILES와 타깃(에너지)을 가져와,
+    기존 smiles_to_graph_data()로 (atom_graph, line_graph)를 생성.
+    """
     path = CSV_PATH
     df = pd.read_csv(path)
     data_list = []

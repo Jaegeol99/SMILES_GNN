@@ -22,7 +22,7 @@ HYPERPARAMS: Dict[str, Any] = {
     'epochs': 150,
     'hidden_dim': 128,
     'num_layers': 4,
-    'dropout_rate': 0.5,
+    'dropout_rate': 0.1,
     'test_split_ratio': 0.2,
     'random_state': 42,
     'num_output_features': len(LABEL_COLS)

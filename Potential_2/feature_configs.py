@@ -25,12 +25,10 @@ from rdkit import Chem
 
 
 FUNCTIONAL_GROUP_SMARTS: Dict[str, str] = {
-    "NH2": "[NX3H2]",
-    "OH": "[OX2H]",
-    "C=O": "[CX3]=[OX1]",
-    "C-N": "[CX4][NX3]",
-    "C=N": "[CX3]=[NX2]",
-    "C#N": "[CX2]#[NX1]",
+    'Nitro': '[N+](=O)[O-]', 'Sulfone': '[#16](=[OX1])(=[OX1])', 'CF3': 'C(F)(F)F', 'C#N': '[CX2]#[NX1]', 'N-C#N': '[#7,n]C#N', 
+    'C=O': '[CX3]=[OX1]', 'Ar-C=O': 'c[CX3]=[OX1]', 'C=N': '[CX3]=[NX2]', 'Ar-C=N': 'c[CX3]=[NX2]', 'O-C=N': '[#8][CX3]=[NX2]', 'N-C=N': '[#7][CX3]=[NX2]', 
+    'Amine_Pri': '[NX3;H2]', 'Amine_Sec': '[NX3;H1]', 'Amine_Tert': '[NX3;H0]', 'Ether': '[OD2]([#6])[#6]', 'OH': '[OX2H]', 'CH3': '[CX4H3]', 
+    'Ar-OH': 'c[OH]', 'Ar-OR': 'c[OD2]', 'Pyridine_N': '[n&D2]', 'Pyrrole_N': '[n&D3]', 'Bridgehead_N': '[n&D3&R2]', 'Multi_N_Ring': '[n]1~[n]~*~*~*~1',
 }
 
 FUNCTIONAL_GROUP_PATTERNS: Dict[str, Chem.Mol] = {}
@@ -53,9 +51,15 @@ NUM_FUNC_GROUPS: int = len(FUNCTIONAL_GROUP_PATTERNS)
 #
 # Default set is "organic + common heteroatoms + halogens".
 NEIGHBOR_ATOMS_SET: Set[int] = {
+    1,   # H
+    5,   # B
     6,   # C
     7,   # N
     8,   # O
+    9,   # F
+    15,  # P
+    16,  # S
+    17,  # Cl
 }
 NEIGHBOR_ATOMS_LIST: List[int] = sorted(NEIGHBOR_ATOMS_SET)
 NUM_NEIGHBOR_FEATURES: int = len(NEIGHBOR_ATOMS_LIST)

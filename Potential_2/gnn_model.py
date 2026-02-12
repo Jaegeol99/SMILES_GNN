@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.utils import softmax
-from torch_geometric.nn import MessagePassing, global_mean_pool, global_add_pool, GlobalAttention
+from torch_geometric.nn import MessagePassing, global_mean_pool, global_add_pool, GlobalAttention, AttentionalAggregation
 from torch_geometric.data import Batch
 from typing import Tuple
 
@@ -46,30 +46,13 @@ class LOHCGNN(nn.Module):
 
 
         # Attention Pooling Layers
-        self.atom_att_pool = GlobalAttention(
-            gate_nn=nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim // 2),
-                nn.ReLU(),
-                nn.Linear(hidden_dim // 2, 1)
-            )
-        )
+        self.atom_att_pool = AttentionalAggregation(gate_nn=nn.Linear(hidden_dim, 1))
+        self.line_att_pool = AttentionalAggregation(gate_nn=nn.Linear(hidden_dim, 1))
 
-        self.line_att_pool = GlobalAttention(
-            gate_nn=nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim // 2),
-                nn.ReLU(),
-                nn.Linear(hidden_dim // 2, 1)
-            )
-        )
-
-        total_concat_dim = hidden_dim * 2
 
         self.mlp = nn.Sequential(
-            nn.Linear(total_concat_dim, hidden_dim * 2),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.ReLU(),
+            nn.Linear(hidden_dim * 2, hidden_dim * 2), nn.ReLU(), nn.Dropout(dropout_rate),
+            nn.Linear(hidden_dim * 2, hidden_dim), nn.ReLU(), nn.Dropout(dropout_rate),
             nn.Linear(hidden_dim, num_output_features)
         )
 

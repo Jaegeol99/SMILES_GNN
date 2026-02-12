@@ -25,8 +25,6 @@ class EdgeGatedConv(MessagePassing):
 class LOHCGNN(nn.Module):
     def __init__(self, node_in_dim, edge_in_dim, line_edge_in_dim, hidden_dim, num_layers, num_output_features, dropout_rate=0.0):
         super().__init__()
-        # [핵심] 단일 인코더 구조 (가중치 공유)
-        # Atom 인코더 1세트, Line 인코더 1세트 = 총 2세트
         self.node_embed = nn.Linear(node_in_dim, hidden_dim)
         self.edge_embed = nn.Linear(edge_in_dim, hidden_dim)
         self.line_edge_embed = nn.Linear(line_edge_in_dim, hidden_dim)

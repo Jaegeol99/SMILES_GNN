@@ -97,7 +97,6 @@ def main():
         model.load_state_dict(torch.load(MODEL_SAVE_PATH, map_location=device))
         logging.info("Loaded best model for final evaluation on the test set")
         
-        # 최종 평가는 테스트 세트로 수행
         _, predictions_scaled, actual_values_scaled, _ = evaluate_epoch(
             model, test_loader, criterion, device
         )

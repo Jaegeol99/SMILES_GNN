@@ -1,22 +1,3 @@
-"""
-Feature configuration aligned with data_processing.py.
-
-This module defines:
-  - atom feature schema (basic + neighbor-count + functional-group flags)
-  - dimensions and index maps used by data_processing.py
-  - scaling constants
-
-Notes on scaling:
-  * data_processing.py currently applies a legacy scaling:
-        x_scaled = clamp(x_atom / ATOM_FEATURE_MAX_VALUES, 0, 1)
-    This will destroy sign information for signed features (formal charge, Gasteiger charge).
-  * To mitigate this without changing the feature vector layout, this file also provides
-    ATOM_FEATURE_MIN_VALUES_SAFE / ATOM_FEATURE_MAX_VALUES_SAFE and a helper
-    `scale_atom_features_safe(x_atom)` that performs min-max scaling into [0, 1]
-    while preserving sign.
-    Activating it requires a 1-line change in data_processing.py.
-"""
-
 import logging
 from typing import List, Dict, Set
 
@@ -165,6 +146,7 @@ def scale_atom_features_safe(x_atom: torch.Tensor) -> torch.Tensor:
 #   [single, double, triple, aromatic, is_conjugated, is_in_ring]
 
 NUM_BOND_FEATURES: int = 6
+LINE_NODE_FEATURE_DIM: int = TOTAL_FEATURE_DIMENSION + NUM_BOND_FEATURES
 BOND_FEATURE_MAX: torch.Tensor = torch.ones(NUM_BOND_FEATURES, dtype=torch.float)
 
 

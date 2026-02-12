@@ -21,7 +21,7 @@ from gnn_model import LOHCGNN
 from training_utils import (
     train_epoch, evaluate_epoch, evaluate_metrics, plot_results
 )
-from feature_configs import NUM_BOND_FEATURES, NUM_LINE_EDGE_FEATURES
+from feature_configs import NUM_BOND_FEATURES, NUM_LINE_EDGE_FEATURES, LINE_NODE_FEATURE_DIM
 
 def main():
     logging.basicConfig(level=LOGGING_LEVEL, format=LOG_FORMAT)
@@ -67,6 +67,7 @@ def main():
     model = LOHCGNN(
         node_in_dim=num_node_features,
         edge_in_dim=NUM_BOND_FEATURES,
+        line_node_in_dim=LINE_NODE_FEATURE_DIM,
         line_edge_in_dim=NUM_LINE_EDGE_FEATURES,
         hidden_dim=HYPERPARAMS['hidden_dim'],
         num_layers=HYPERPARAMS['num_layers'],

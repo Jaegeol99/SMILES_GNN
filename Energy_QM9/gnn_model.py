@@ -27,75 +27,77 @@ class EdgeGatedConv(MessagePassing):
         return new_x, new_edge_attr
 
 class LOHCGNN(nn.Module):
-    def __init__(self, node_in_dim: int, edge_in_dim: int, line_edge_in_dim: int,
+    def __init__(self, node_in_dim: int, edge_in_dim: int, line_node_in_dim: int, line_edge_in_dim: int,
                  hidden_dim: int, num_layers: int, num_output_features: int, dropout_rate: float = 0.5):
         super().__init__()
         self.node_embed = nn.Linear(node_in_dim, hidden_dim)
-        self.edge_embed = nn.Linear(edge_in_dim, hidden_dim)
+        self.line_node_embed = nn.Linear(line_node_in_dim, hidden_dim)
         self.line_edge_embed = nn.Linear(line_edge_in_dim, hidden_dim)
-
-        self.atom_conv_layers = nn.ModuleList([
-            EdgeGatedConv(hidden_dim, hidden_dim, hidden_dim) for _ in range(num_layers)
-        ])
+        
         self.line_conv_layers = nn.ModuleList([
             EdgeGatedConv(hidden_dim, hidden_dim, hidden_dim) for _ in range(num_layers)
         ])
 
-
-        # Attention Pooling Layers
         self.atom_att_pool = AttentionalAggregation(gate_nn=nn.Linear(hidden_dim, 1))
-        self.line_att_pool = AttentionalAggregation(gate_nn=nn.Linear(hidden_dim, 1))
 
-
-        # combined = [atom_pool (hidden_dim), line_pool (hidden_dim)] -> hidden_dim * 2
         self.mlp = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim * 2), nn.ReLU(), nn.Dropout(dropout_rate),
+            nn.Linear(hidden_dim, hidden_dim * 2), nn.ReLU(), nn.Dropout(dropout_rate),
             nn.Linear(hidden_dim * 2, hidden_dim), nn.ReLU(), nn.Dropout(dropout_rate),
             nn.Linear(hidden_dim, num_output_features)
         )
 
+    def _get_ptr_from_batch(self, batch: torch.Tensor) -> torch.Tensor:
+        # Fallback if atom_data.ptr is not available.
+        # ptr[g] = starting node index of graph g in the concatenated batch.
+        num_graphs = int(batch.max().item() + 1) if batch.numel() > 0 else 0
+        counts = torch.bincount(batch, minlength=num_graphs)
+        ptr = torch.zeros((num_graphs + 1,), device=batch.device, dtype=torch.long)
+        ptr[1:] = torch.cumsum(counts, dim=0)
+        return ptr
+    
     def forward(self, atom_data: Batch, line_data: Batch) -> torch.Tensor:
-        h = self.node_embed(atom_data.x)
-        e = self.edge_embed(atom_data.edge_attr)
+        # Base atom states (used for readout and to support graphs with no bonds)
+        h0 = self.node_embed(atom_data.x)
 
-        l = self.edge_embed(line_data.x)
+        # Directed-bond (line) graph states
+        l = self.line_node_embed(line_data.x)
         le = self.line_edge_embed(line_data.edge_attr)
 
-        for atom_conv, line_conv in zip(self.atom_conv_layers, self.line_conv_layers):
+        for line_conv in self.line_conv_layers:
             l_upd, le_upd = line_conv(l, line_data.edge_index, le)
-            h_upd, e_upd = atom_conv(h, atom_data.edge_index, e)
-
-            h = h + h_upd
-            e = e + e_upd
             l = l + l_upd
             le = le + le_upd
 
+        # [CHANGED A2] Aggregate directed-bond states -> atom states (sum of incoming bonds)
+        # line_data.dst stores *local* destination atom indices per molecule.
+        if hasattr(atom_data, "ptr") and atom_data.ptr is not None:
+            ptr = atom_data.ptr
+        else:
+            ptr = self._get_ptr_from_batch(atom_data.batch)
+
+        if hasattr(line_data, "dst"):
+            dst_local = line_data.dst
+        else:
+            # Backward compatible: if dst not provided, fall back to zeros (no bond contribution).
+            dst_local = torch.zeros((l.size(0),), device=l.device, dtype=torch.long)
+
+        if line_data.batch.numel() > 0:
+            offsets = ptr[line_data.batch]  # start index of the corresponding molecule's atom block
+            dst_global = dst_local.to(offsets.device) + offsets
+        else:
+            dst_global = dst_local
+
+        atom_h = torch.zeros((atom_data.num_nodes, l.size(-1)), device=l.device, dtype=l.dtype)
+        if dst_global.numel() > 0 and l.numel() > 0:
+            atom_h.index_add_(0, dst_global, l)
+
+        # Combine base atom features and message-aggregated bond info (common D-MPNN variant)
+        h = h0 + atom_h
+
+        # Attention pooling across atoms per graph
         att_logits = self.atom_att_pool.gate_nn(h)
         alpha = softmax(att_logits, atom_data.batch)
+        h_att = self.atom_att_pool(h, atom_data.batch)
 
-        h_att = self.atom_att_pool(h,atom_data.batch)
-        l_att = self.line_att_pool(l,line_data.batch)
-
-        num_graphs = getattr(atom_data, 'num_graphs', None)
-        if num_graphs is None:
-            num_graphs = int(atom_data.batch.max().item() + 1) if atom_data.batch.numel() > 0 else 0
-
-        # l_att의 크기가 num_graphs보다 작다면 (빈 그래프 존재 시) 패딩 처리
-        if l_att.shape[0] != num_graphs:
-            # 전체가 0인 텐서 생성
-            l_att_full = torch.zeros((num_graphs, h_att.shape[1]), device=l_att.device, dtype=l_att.dtype)
-            
-            if l_att.numel() > 0:
-                # 존재하는 그래프의 인덱스를 찾아 해당 위치에 값 할당
-                present_idxs = torch.unique(line_data.batch)
-                l_att_full[present_idxs] = l_att
-        else:
-            # 크기가 맞으면 그대로 사용
-            l_att_full = l_att
-        # ---------------------------------------------------------
-
-        # [중요] 반드시 l_att 대신 l_att_full을 사용해야 합니다.
-        combined = torch.cat([h_att, l_att_full], dim=-1)
-        pred = self.mlp(combined)
-
+        pred = self.mlp(h_att)
         return pred, {"atom_attention": alpha}

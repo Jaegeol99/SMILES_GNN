@@ -8,7 +8,7 @@ CSV_PATH: str = "qm9_valid_smiles_atomization_free_energy.csv"  # 첨부 파일�
 CSV_SMILES_COL: str = "smiles"
 CSV_TARGET_COL: str = "A_G_eV"   # 지금 생성한 csv 헤더 기준
 CSV_INDEX_COL: str = "i"         # 있으면 로그/추적용
-MAX_SAMPLES: int | None = None     # 전체(~130k) 다 쓰면 None, 빠른 실험이면 제한
+MAX_SAMPLES: int | None = 50000     # 전체(~130k) 다 쓰면 None, 빠른 실험이면 제한
 
 # Target metadata
 PROPERTY_NAMES: List[str] = ["QM9_G_free_energy_298K_eV"]
@@ -23,10 +23,10 @@ LOG_FORMAT: str = '%(asctime)s - %(levelname)s - %(message)s'
 
 # Hyperparameters for the model
 HYPERPARAMS: Dict[str, Any] = {
-    'batch_size': 64,
+    'batch_size': 32,
     'learning_rate': 0.001,
     'epochs': 50,
-    'hidden_dim': 256,
+    'hidden_dim': 128,
     'num_layers': 4,
     'dropout_rate': 0.1,
     'test_split_ratio': 0.2,

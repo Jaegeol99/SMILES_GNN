@@ -26,7 +26,7 @@ SEED: int = 42
 
 HYPERPARAMS: Dict[str, Any] = {
     "batch_size": 50,
-    "epochs": 100,
+    "epochs": 200,
     "test_split_ratio": 0.2,
     "random_state": 42,
 
@@ -71,7 +71,7 @@ HYPERPARAMS: Dict[str, Any] = {
     "hard_mining_top_k": 0,
     "hard_mining_percent": 0.05,
     "hard_oversample_mult": 3,
-    "stage2_epochs": 20,
+    "stage2_epochs": 50,
     "stage2_learning_rate": 2e-4,
     "stage2_optimizer": "adamw",
     "stage2_weight_decay": 1e-4,

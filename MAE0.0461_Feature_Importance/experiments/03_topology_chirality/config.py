@@ -6,7 +6,7 @@ CSV_SMILES_COL: str = "smiles"
 CSV_TARGET_COL: str = "A_G_eV"
 CSV_INDEX_COL: str = "i"
 
-MAX_SAMPLES: Optional[int] = 20000
+MAX_SAMPLES: Optional[int] = None
 
 PROPERTY_NAMES: List[str] = ["QM9_G_free_energy_298K_eV"]
 LABEL_COLS: List[str] = ["G"]
@@ -26,7 +26,7 @@ SEED: int = 42
 
 HYPERPARAMS: Dict[str, Any] = {
     "batch_size": 50,
-    "epochs": 20,
+    "epochs": 200,
     "test_split_ratio": 0.2,
     "random_state": 42,
 
@@ -68,10 +68,10 @@ HYPERPARAMS: Dict[str, Any] = {
     "include_smiles_in_worstk": True,
 
     "enable_hard_mining": True,
-    "hard_mining_top_k": 300,
-    "hard_mining_percent": 0.0,
-    "hard_oversample_mult": 5,
-    "stage2_epochs": 2,
+    "hard_mining_top_k": 0,
+    "hard_mining_percent": 0.05,
+    "hard_oversample_mult": 3,
+    "stage2_epochs": 50,
     "stage2_learning_rate": 2e-4,
     "stage2_optimizer": "adamw",
     "stage2_weight_decay": 1e-4,

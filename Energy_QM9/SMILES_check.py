@@ -1,7 +1,7 @@
 from rdkit import Chem
 from rdkit.Chem import Draw
 
-smiles = "[H]C#C[C@]1([H])C23([H])OC12(C([H])([H])[H])C3([H])[H]"
+smiles = "CC1=CC(=N)N=CN1"
 
 mol0 = Chem.MolFromSmiles(smiles, sanitize=False)
 if mol0 is None:

@@ -24,8 +24,8 @@ MODEL_SAVE_PATH: str = f"{OUTPUT_DIR}/lohc_model.pth"
 STAGE2_MODEL_SAVE_PATH: str = f"{OUTPUT_DIR}/lohc_model_stage2.pth"
 LABEL_SCALING_PARAMS_PATH: str = f"{OUTPUT_DIR}/label_scaler.npz"
 GLOBAL_SCALING_PARAMS_PATH: str = f"{OUTPUT_DIR}/global_desc_standard_scaler.npz"
-ABLATION_RESULTS_PATH: str = f"{OUTPUT_DIR}/ablation_results.csv"
 REPORT_DIR: str = f"{OUTPUT_DIR}/reports"
+FEATURE_IMPORTANCE_RESULTS_PATH: str = f"{REPORT_DIR}/feature_importance_block_permutation.csv"
 
 # -------------------------
 # Logging
@@ -107,12 +107,7 @@ HYPERPARAMS: Dict[str, Any] = {
     "stage2_scheduler_factor": 0.5,
     "stage2_scheduler_min_lr": 1e-6,
     "save_train_worstk_best_checkpoint": True,
+    "save_feature_importance": True,
+    "feature_importance_repeats": 1,
 
-    # ablation (run with: python train.py --ablation)
-    "run_ablation": False,
-    "ablation_epochs": 30,
-    "ablation_repeats": 1,
-    "ablation_huber_deltas": [0.5, 1.0, 2.0],
-    "ablation_grad_clips": [0.0, 1.0, 2.0],
-    "ablation_schedulers": ["none", "plateau"],
 }

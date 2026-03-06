@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import logging
 import os
 import random
@@ -18,7 +18,7 @@ from config import (
     CSV_INDEX_COL,
     CSV_PATH,
     CSV_SMILES_COL,
-    FEATURE_IMPORTANCE_RESULTS_PATH,
+    FEATURE_IMPORTANCE_CSV_PATH,
     GLOBAL_SCALING_PARAMS_PATH,
     HYPERPARAMS,
     LABEL_SCALING_PARAMS_PATH,
@@ -41,21 +41,14 @@ from data_processing import (
     load_and_preprocess_qm9_data,
 )
 from feature_configs import (
-    ATOM_TYPE_DIM,
-    CONJUGATION_FLOW_DIM,
-    DEGREE_DIM,
-    FORMAL_CHARGE_DIM,
     GLOBAL_FEATURE_DIM,
     HYB_DIM,
     LAPLACIAN_PE_K,
     LINE_NODE_FEATURE_DIM,
     NUM_BOND_FEATURES,
-    NUM_FUNC_GROUPS,
-    NUM_NEIGHBOR_FEATURES,
     NUM_LINE_EDGE_FEATURES,
-    PSEUDO_ANGLE_DIM,
     RING_STRAIN_DIM,
-    TOTAL_H_DIM,
+    TOTAL_FEATURE_DIMENSION,
 )
 from gnn_model import LOHCGNN
 from training_utils import (
@@ -161,9 +154,8 @@ def build_optimizer(model: nn.Module, hp: Dict[str, Any]) -> optim.Optimizer:
     return optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
 
 
-# [수정됨] Chemprop의 Noam 스케줄러 (Linear Warm-up + Exponential Decay)
 def build_noam_scheduler(optimizer, epochs, steps_per_epoch):
-    warmup_epochs = 2.0  # 초기 2 에포크 동안 Warm-up
+    warmup_epochs = 2.0
     init_lr = 1e-4
     max_lr = 1e-3
     final_lr = 1e-4
@@ -173,316 +165,301 @@ def build_noam_scheduler(optimizer, epochs, steps_per_epoch):
     
     def lr_lambda(step):
         if step < warmup_steps:
-            # Linear Warmup
             lr = init_lr + (max_lr - init_lr) * step / max(1, warmup_steps)
         else:
-            # Exponential Decay
             if decay_steps <= 0:
                 lr = final_lr
             else:
                 factor = (final_lr / max_lr) ** (1.0 / decay_steps)
                 lr = max_lr * (factor ** (step - warmup_steps))
-        
-        # LambdaLR은 초기 lr에 이 값을 곱하므로, optimizer의 초기 lr로 나누어 줍니다.
-        return lr / optimizer.defaults.get('lr', 1e-3)
+        # LambdaLR expects a multiplier relative to the optimizer base LR.
+        return lr / optimizer.defaults.get("lr", 1e-3)
             
     return LambdaLR(optimizer, lr_lambda)
 
 
-def _build_block_permutation_specs(num_node_features: int) -> List[Dict[str, Any]]:
-    blocks: List[Dict[str, Any]] = []
+def _make_block_permutation_specs() -> List[Dict[str, Any]]:
+    line_node_bond_start = TOTAL_FEATURE_DIMENSION
+    line_node_pe_src_start = line_node_bond_start + NUM_BOND_FEATURES
+    line_node_pe_dst_start = line_node_pe_src_start + LAPLACIAN_PE_K
 
-    def add_spec(tensor_name: str, block_name: str, start: int, end: int) -> None:
-        if int(end) > int(start):
-            blocks.append(
-                {
-                    "tensor_name": str(tensor_name),
-                    "block_name": str(block_name),
-                    "start": int(start),
-                    "end": int(end),
-                }
-            )
+    line_edge_in_bond_start = HYB_DIM
+    line_edge_out_bond_start = line_edge_in_bond_start + NUM_BOND_FEATURES
+    line_edge_pseudo_angle_start = line_edge_out_bond_start + NUM_BOND_FEATURES
+    line_edge_ring_strain_start = line_edge_pseudo_angle_start + 1
+    line_edge_conjugation_flow_start = line_edge_ring_strain_start + RING_STRAIN_DIM
 
-    # Atom node feature blocks
-    off = 0
-    add_spec("atom_x", "atom_type", off, off + ATOM_TYPE_DIM)
-    off += ATOM_TYPE_DIM
-    add_spec("atom_x", "atom_hybridization", off, off + HYB_DIM)
-    off += HYB_DIM
-    add_spec("atom_x", "atom_is_aromatic", off, off + 1)
-    off += 1
-    add_spec("atom_x", "atom_total_h", off, off + TOTAL_H_DIM)
-    off += TOTAL_H_DIM
-    add_spec("atom_x", "atom_formal_charge", off, off + FORMAL_CHARGE_DIM)
-    off += FORMAL_CHARGE_DIM
-    add_spec("atom_x", "atom_gasteiger_charge", off, off + 1)
-    off += 1
-    add_spec("atom_x", "atom_degree", off, off + DEGREE_DIM)
-    off += DEGREE_DIM
-    add_spec("atom_x", "atom_in_ring", off, off + 1)
-    off += 1
-    add_spec("atom_x", "atom_neighbor_counts", off, off + NUM_NEIGHBOR_FEATURES)
-    off += NUM_NEIGHBOR_FEATURES
-    add_spec("atom_x", "atom_functional_groups", off, off + NUM_FUNC_GROUPS)
-    off += NUM_FUNC_GROUPS
-    if off != int(num_node_features):
-        logging.warning(
-            f"Atom feature dimension mismatch in block spec builder: expected={num_node_features}, parsed={off}. "
-            "Using a single fallback atom block."
-        )
-        blocks = [b for b in blocks if b["tensor_name"] != "atom_x"]
-        add_spec("atom_x", "atom_all_features", 0, int(num_node_features))
-
-    # Line-node feature blocks: [source atom features | bond features | source PE | destination PE]
-    off = 0
-    add_spec("line_x", "line_source_atom_features", off, off + int(num_node_features))
-    off += int(num_node_features)
-    add_spec("line_x", "line_bond_features", off, off + NUM_BOND_FEATURES)
-    off += NUM_BOND_FEATURES
-    add_spec("line_x", "line_source_laplacian_pe", off, off + LAPLACIAN_PE_K)
-    off += LAPLACIAN_PE_K
-    add_spec("line_x", "line_destination_laplacian_pe", off, off + LAPLACIAN_PE_K)
-    off += LAPLACIAN_PE_K
-    if off != int(LINE_NODE_FEATURE_DIM):
-        logging.warning(
-            f"Line-node feature dimension mismatch in block spec builder: expected={LINE_NODE_FEATURE_DIM}, parsed={off}. "
-            "Using a single fallback line-node block."
-        )
-        blocks = [b for b in blocks if b["tensor_name"] != "line_x"]
-        add_spec("line_x", "line_all_features", 0, int(LINE_NODE_FEATURE_DIM))
-
-    # Line-edge feature blocks
-    off = 0
-    add_spec("line_edge_attr", "line_edge_center_hybridization", off, off + HYB_DIM)
-    off += HYB_DIM
-    add_spec("line_edge_attr", "line_edge_incoming_bond", off, off + NUM_BOND_FEATURES)
-    off += NUM_BOND_FEATURES
-    add_spec("line_edge_attr", "line_edge_outgoing_bond", off, off + NUM_BOND_FEATURES)
-    off += NUM_BOND_FEATURES
-    add_spec("line_edge_attr", "line_edge_pseudo_angle", off, off + PSEUDO_ANGLE_DIM)
-    off += PSEUDO_ANGLE_DIM
-    add_spec("line_edge_attr", "line_edge_ring_strain", off, off + RING_STRAIN_DIM)
-    off += RING_STRAIN_DIM
-    add_spec("line_edge_attr", "line_edge_conjugation_flow", off, off + CONJUGATION_FLOW_DIM)
-    off += CONJUGATION_FLOW_DIM
-    if off != int(NUM_LINE_EDGE_FEATURES):
-        logging.warning(
-            f"Line-edge feature dimension mismatch in block spec builder: expected={NUM_LINE_EDGE_FEATURES}, parsed={off}. "
-            "Using a single fallback line-edge block."
-        )
-        blocks = [b for b in blocks if b["tensor_name"] != "line_edge_attr"]
-        add_spec("line_edge_attr", "line_edge_all_features", 0, int(NUM_LINE_EDGE_FEATURES))
-
-    # Global descriptor block
-    add_spec("global_g", "global_descriptors", 0, int(GLOBAL_FEATURE_DIM))
-    return blocks
+    return [
+        {
+            "name": "atom_node_features",
+            "tensor_group": "atom.x",
+            "targets": [("atom", "x", 0, TOTAL_FEATURE_DIMENSION)],
+            "block_size": TOTAL_FEATURE_DIMENSION,
+        },
+        {
+            "name": "line_src_atom_features",
+            "tensor_group": "line.x",
+            "targets": [("line", "x", 0, TOTAL_FEATURE_DIMENSION)],
+            "block_size": TOTAL_FEATURE_DIMENSION,
+        },
+        {
+            "name": "line_bond_features",
+            "tensor_group": "line.x",
+            "targets": [("line", "x", line_node_bond_start, line_node_bond_start + NUM_BOND_FEATURES)],
+            "block_size": NUM_BOND_FEATURES,
+        },
+        {
+            "name": "line_src_laplacian_pe",
+            "tensor_group": "line.x",
+            "targets": [("line", "x", line_node_pe_src_start, line_node_pe_src_start + LAPLACIAN_PE_K)],
+            "block_size": LAPLACIAN_PE_K,
+        },
+        {
+            "name": "line_dst_laplacian_pe",
+            "tensor_group": "line.x",
+            "targets": [("line", "x", line_node_pe_dst_start, line_node_pe_dst_start + LAPLACIAN_PE_K)],
+            "block_size": LAPLACIAN_PE_K,
+        },
+        {
+            "name": "line_center_hybridization",
+            "tensor_group": "line.edge_attr",
+            "targets": [("line", "edge_attr", 0, HYB_DIM)],
+            "block_size": HYB_DIM,
+        },
+        {
+            "name": "line_incoming_bond_features",
+            "tensor_group": "line.edge_attr",
+            "targets": [("line", "edge_attr", line_edge_in_bond_start, line_edge_in_bond_start + NUM_BOND_FEATURES)],
+            "block_size": NUM_BOND_FEATURES,
+        },
+        {
+            "name": "line_outgoing_bond_features",
+            "tensor_group": "line.edge_attr",
+            "targets": [("line", "edge_attr", line_edge_out_bond_start, line_edge_out_bond_start + NUM_BOND_FEATURES)],
+            "block_size": NUM_BOND_FEATURES,
+        },
+        {
+            "name": "line_pseudo_angle",
+            "tensor_group": "line.edge_attr",
+            "targets": [("line", "edge_attr", line_edge_pseudo_angle_start, line_edge_pseudo_angle_start + 1)],
+            "block_size": 1,
+        },
+        {
+            "name": "line_ring_strain",
+            "tensor_group": "line.edge_attr",
+            "targets": [("line", "edge_attr", line_edge_ring_strain_start, line_edge_ring_strain_start + RING_STRAIN_DIM)],
+            "block_size": RING_STRAIN_DIM,
+        },
+        {
+            "name": "line_conjugation_flow",
+            "tensor_group": "line.edge_attr",
+            "targets": [("line", "edge_attr", line_edge_conjugation_flow_start, line_edge_conjugation_flow_start + 1)],
+            "block_size": 1,
+        },
+        {
+            "name": "global_descriptors",
+            "tensor_group": "atom.g",
+            "targets": [("atom", "g", 0, GLOBAL_FEATURE_DIM)],
+            "block_size": GLOBAL_FEATURE_DIM,
+        },
+    ]
 
 
-def _permute_block_rows_inplace(
-    x: Optional[torch.Tensor],
-    start: int,
-    end: int,
+def _permute_tensor_block_rows_(tensor: Optional[torch.Tensor], start: int, end: int, rng: np.random.Generator) -> None:
+    if tensor is None or tensor.numel() == 0 or tensor.dim() != 2:
+        return
+    n_rows, n_cols = int(tensor.size(0)), int(tensor.size(1))
+    if n_rows < 2 or start >= n_cols:
+        return
+    end = min(int(end), n_cols)
+    if end <= start:
+        return
+
+    perm = torch.as_tensor(rng.permutation(n_rows), device=tensor.device, dtype=torch.long)
+    permuted = tensor.index_select(0, perm)
+    tensor[:, start:end] = permuted[:, start:end]
+
+
+def _apply_block_permutation_(
+    atom_batch: Any,
+    line_batch: Any,
+    block_spec: Dict[str, Any],
     rng: np.random.Generator,
-) -> Optional[torch.Tensor]:
-    if x is None or x.ndim != 2 or x.numel() == 0 or int(x.size(0)) <= 1:
-        return x
-
-    c0 = max(0, min(int(start), int(x.size(1))))
-    c1 = max(0, min(int(end), int(x.size(1))))
-    if c1 <= c0:
-        return x
-
-    idx_np = rng.permutation(int(x.size(0)))
-    idx = torch.tensor(idx_np, dtype=torch.long, device=x.device)
-    x[:, c0:c1] = x[idx, c0:c1]
-    return x
+) -> None:
+    for batch_name, attr_name, start, end in block_spec.get("targets", []):
+        batch_obj = atom_batch if batch_name == "atom" else line_batch
+        tensor = getattr(batch_obj, attr_name, None)
+        _permute_tensor_block_rows_(tensor, int(start), int(end), rng)
 
 
-def _evaluate_mae_with_block_permutation(
+def _collect_predictions(
     model: nn.Module,
     loader: DataLoader,
-    criterion: nn.Module,
     device: torch.device,
-    label_median: Optional[np.ndarray],
-    label_iqr: Optional[np.ndarray],
     block_spec: Optional[Dict[str, Any]] = None,
-    rng: Optional[np.random.Generator] = None,
-) -> float:
+    seed: int = 0,
+) -> Tuple[np.ndarray, np.ndarray]:
+    was_training = model.training
     model.eval()
-    preds: List[np.ndarray] = []
-    trues: List[np.ndarray] = []
+
+    predictions_list: List[np.ndarray] = []
+    targets_list: List[np.ndarray] = []
 
     with torch.no_grad():
-        for batch in loader:
+        for batch_idx, batch in enumerate(loader):
             if not (isinstance(batch, (list, tuple)) and len(batch) == 2):
+                logging.warning("Invalid batch during feature importance evaluation, skipping.")
                 continue
+
             atom_batch, line_batch = batch
             atom_batch = atom_batch.to(device)
             line_batch = line_batch.to(device)
 
-            atom_in = atom_batch
-            line_in = line_batch
+            if block_spec is not None:
+                rng = np.random.default_rng(int(seed) + int(batch_idx))
+                _apply_block_permutation_(atom_batch, line_batch, block_spec, rng)
 
-            if block_spec is not None and rng is not None:
-                atom_in = atom_batch.clone()
-                line_in = line_batch.clone()
-                t_name = str(block_spec.get("tensor_name", ""))
-                c0 = int(block_spec.get("start", 0))
-                c1 = int(block_spec.get("end", 0))
+            output, _ = model(atom_batch, line_batch)
+            target = atom_batch.y.view_as(output)
 
-                if t_name == "atom_x":
-                    atom_in.x = _permute_block_rows_inplace(getattr(atom_in, "x", None), c0, c1, rng)
-                elif t_name == "line_x":
-                    line_in.x = _permute_block_rows_inplace(getattr(line_in, "x", None), c0, c1, rng)
-                elif t_name == "line_edge_attr":
-                    line_in.edge_attr = _permute_block_rows_inplace(getattr(line_in, "edge_attr", None), c0, c1, rng)
-                elif t_name == "global_g":
-                    g_atom = getattr(atom_in, "g", None)
-                    if g_atom is not None and g_atom.ndim == 2 and g_atom.numel() > 0 and int(g_atom.size(0)) > 1:
-                        c0g = max(0, min(c0, int(g_atom.size(1))))
-                        c1g = max(0, min(c1, int(g_atom.size(1))))
-                        if c1g > c0g:
-                            idx_np = rng.permutation(int(g_atom.size(0)))
-                            idx = torch.tensor(idx_np, dtype=torch.long, device=g_atom.device)
-                            g_atom[:, c0g:c1g] = g_atom[idx, c0g:c1g]
-                            atom_in.g = g_atom
+            predictions_list.append(output.detach().cpu().numpy())
+            targets_list.append(target.detach().cpu().numpy())
 
-                            g_line = getattr(line_in, "g", None)
-                            if (
-                                g_line is not None
-                                and g_line.ndim == 2
-                                and int(g_line.size(0)) == int(g_atom.size(0))
-                            ):
-                                c0l = max(0, min(c0, int(g_line.size(1))))
-                                c1l = max(0, min(c1, int(g_line.size(1))))
-                                if c1l > c0l:
-                                    g_line[:, c0l:c1l] = g_line[idx, c0l:c1l]
-                                    line_in.g = g_line
+    if was_training:
+        model.train()
 
-            out, _ = model(atom_in, line_in)
-            tgt = atom_in.y.view_as(out)
-            _ = criterion(out, tgt)
+    predictions = np.concatenate(predictions_list, axis=0) if predictions_list else np.array([])
+    targets = np.concatenate(targets_list, axis=0) if targets_list else np.array([])
+    return predictions, targets
 
-            preds.append(out.detach().cpu().numpy())
-            trues.append(tgt.detach().cpu().numpy())
 
-    if not preds or not trues:
+def _inverse_scale_if_needed(
+    values: np.ndarray,
+    label_median: Optional[np.ndarray],
+    label_iqr: Optional[np.ndarray],
+) -> np.ndarray:
+    if values.size == 0 or label_median is None or label_iqr is None:
+        return values
+    return inverse_scale_labels(values, label_median, label_iqr)
+
+
+def _compute_mean_mae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    if y_true.size == 0 or y_pred.size == 0 or y_true.shape != y_pred.shape:
         return float("nan")
+    return float(mean_absolute_error(y_true, y_pred))
 
-    y_pred = np.concatenate(preds, axis=0)
-    y_true = np.concatenate(trues, axis=0)
 
-    if label_median is not None and label_iqr is not None:
-        y_pred = inverse_scale_labels(y_pred, label_median, label_iqr)
-        y_true = inverse_scale_labels(y_true, label_median, label_iqr)
+def _resolve_feature_importance_loader(
+    data_list: List[Any],
+    train_indices: List[int],
+    val_loader: DataLoader,
+    test_loader: DataLoader,
+    hp: Dict[str, Any],
+    skip_test: bool,
+) -> Tuple[Optional[str], Optional[DataLoader]]:
+    requested = str(hp.get("feature_importance_split", "test")).strip().lower()
+    if requested not in {"train", "val", "test"}:
+        requested = "test"
 
-    return float(np.mean(np.abs(y_pred - y_true)))
+    candidates = [requested] + [split for split in ("test", "val", "train") if split != requested]
+    if skip_test:
+        candidates = [split for split in candidates if split != "test"]
+
+    for split in candidates:
+        if split == "test" and len(test_loader.dataset) > 0:
+            return split, test_loader
+        if split == "val" and len(val_loader.dataset) > 0:
+            return split, val_loader
+        if split == "train" and len(train_indices) > 0:
+            return split, DataLoader(
+                [data_list[i] for i in train_indices],
+                batch_size=hp["batch_size"],
+                shuffle=False,
+            )
+    return None, None
 
 
 def compute_block_permutation_importance(
     model: nn.Module,
     loader: DataLoader,
-    criterion: nn.Module,
     device: torch.device,
     label_median: Optional[np.ndarray],
     label_iqr: Optional[np.ndarray],
-    hp: Dict[str, Any],
-    num_node_features: int,
+    repeats: int,
+    seed: int,
+    split_name: str,
 ) -> List[Dict[str, Any]]:
-    repeats = max(1, int(hp.get("feature_importance_repeats", 1)))
-    blocks = _build_block_permutation_specs(num_node_features=num_node_features)
-    base_seed = int(hp.get("random_state", SEED))
+    baseline_pred_s, baseline_true_s = _collect_predictions(model, loader, device, block_spec=None, seed=seed)
+    if baseline_pred_s.size == 0 or baseline_true_s.size == 0:
+        return []
 
-    baseline_mae = _evaluate_mae_with_block_permutation(
-        model=model,
-        loader=loader,
-        criterion=criterion,
-        device=device,
-        label_median=label_median,
-        label_iqr=label_iqr,
-        block_spec=None,
-        rng=None,
-    )
+    baseline_pred = _inverse_scale_if_needed(baseline_pred_s, label_median, label_iqr)
+    baseline_true = _inverse_scale_if_needed(baseline_true_s, label_median, label_iqr)
+    baseline_mae = _compute_mean_mae(baseline_true, baseline_pred)
 
     rows: List[Dict[str, Any]] = []
-    for b_idx, block in enumerate(blocks):
-        permuted_maes: List[float] = []
-        for rep in range(repeats):
-            rng = np.random.default_rng(base_seed + 10000 + (b_idx * 257) + rep)
-            mae_perm = _evaluate_mae_with_block_permutation(
-                model=model,
-                loader=loader,
-                criterion=criterion,
-                device=device,
-                label_median=label_median,
-                label_iqr=label_iqr,
-                block_spec=block,
-                rng=rng,
-            )
-            if np.isfinite(mae_perm):
-                permuted_maes.append(float(mae_perm))
+    block_specs = _make_block_permutation_specs()
+    repeats = max(int(repeats), 1)
 
-        mae_mean = float(np.mean(permuted_maes)) if permuted_maes else float("nan")
-        mae_std = float(np.std(permuted_maes)) if permuted_maes else float("nan")
-        delta = mae_mean - baseline_mae if np.isfinite(baseline_mae) and np.isfinite(mae_mean) else float("nan")
-        delta_pct = (delta / max(abs(baseline_mae), 1e-12) * 100.0) if np.isfinite(delta) else float("nan")
+    for block_idx, block_spec in enumerate(block_specs):
+        logging.info(
+            f"Feature importance [{block_idx + 1}/{len(block_specs)}]: "
+            f"permuting {block_spec['name']} on {split_name} split"
+        )
+        permuted_maes: List[float] = []
+
+        for repeat_idx in range(repeats):
+            repeat_seed = int(seed) + (block_idx * 1000) + repeat_idx
+            perm_pred_s, perm_true_s = _collect_predictions(
+                model,
+                loader,
+                device,
+                block_spec=block_spec,
+                seed=repeat_seed,
+            )
+            perm_pred = _inverse_scale_if_needed(perm_pred_s, label_median, label_iqr)
+            perm_true = _inverse_scale_if_needed(perm_true_s, label_median, label_iqr)
+            permuted_maes.append(_compute_mean_mae(perm_true, perm_pred))
+
+        permuted_mae_mean = float(np.mean(permuted_maes))
+        permuted_mae_std = float(np.std(permuted_maes))
+        importance_delta = float(permuted_mae_mean - baseline_mae)
+        relative_increase_pct = float((importance_delta / max(abs(baseline_mae), 1e-12)) * 100.0)
 
         rows.append(
             {
-                "block_name": block["block_name"],
-                "tensor_name": block["tensor_name"],
-                "start_col": block["start"],
-                "end_col": block["end"],
+                "split": split_name,
+                "block_name": block_spec["name"],
+                "tensor_group": block_spec["tensor_group"],
+                "block_size": int(block_spec["block_size"]),
                 "repeats": repeats,
-                "baseline_mae": baseline_mae,
-                "permuted_mae_mean": mae_mean,
-                "permuted_mae_std": mae_std,
-                "importance_delta_mae": delta,
-                "importance_delta_pct": delta_pct,
+                "baseline_mae": float(baseline_mae),
+                "permuted_mae_mean": permuted_mae_mean,
+                "permuted_mae_std": permuted_mae_std,
+                "importance_mae_delta": importance_delta,
+                "relative_increase_pct": relative_increase_pct,
             }
         )
 
-    rows_sorted = sorted(
-        rows,
-        key=lambda r: float(r["importance_delta_mae"]) if np.isfinite(r["importance_delta_mae"]) else -np.inf,
-        reverse=True,
-    )
-    for rank, r in enumerate(rows_sorted, start=1):
-        r["rank"] = rank
+    rows.sort(key=lambda row: row["importance_mae_delta"], reverse=True)
+    for rank, row in enumerate(rows, start=1):
+        row["rank"] = rank
+    return rows
 
-    os.makedirs(REPORT_DIR, exist_ok=True)
+
+def save_block_permutation_importance_csv(rows: List[Dict[str, Any]], out_path: str) -> None:
+    if not rows:
+        return
+
     import csv
 
-    with open(FEATURE_IMPORTANCE_RESULTS_PATH, "w", newline="", encoding="utf-8") as f:
-        fieldnames = [
-            "rank",
-            "block_name",
-            "tensor_name",
-            "start_col",
-            "end_col",
-            "repeats",
-            "baseline_mae",
-            "permuted_mae_mean",
-            "permuted_mae_std",
-            "importance_delta_mae",
-            "importance_delta_pct",
-        ]
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        for row in rows_sorted:
-            w.writerow(row)
-
-    logging.info(f"Saved block permutation feature importance to: {FEATURE_IMPORTANCE_RESULTS_PATH}")
-    topn = rows_sorted[: min(5, len(rows_sorted))]
-    if topn:
-        logging.info("Top feature blocks by MAE increase:")
-        for r in topn:
-            logging.info(
-                f"  rank={r['rank']} block={r['block_name']} tensor={r['tensor_name']} "
-                f"delta_mae={float(r['importance_delta_mae']):.6f}"
-            )
-
-    return rows_sorted
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    fieldnames = ["rank"] + [key for key in rows[0].keys() if key != "rank"]
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
 
 
 def log_val_diagnostics(
@@ -492,29 +469,21 @@ def log_val_diagnostics(
     val_pred: np.ndarray,
     identifiers: List[str],
     tracker: Optional[Dict[str, Any]] = None,
-) -> float:
+) -> Tuple[float, float]:
     r2_per = r2_score(val_true, val_pred, multioutput="raw_values")
     mae_per = mean_absolute_error(val_true, val_pred, multioutput="raw_values")
     r2_mean = float(np.mean(r2_per))
     mae_mean = float(np.mean(mae_per))
 
-    if bool(hp.get("log_targetwise_mae", True)):
-        per_str = ", ".join([f"{PROPERTY_NAMES[i]}: {float(mae_per[i]):.6f}" for i in range(len(mae_per))])
-        logging.info(f"  Val MAE (per target): {per_str}")
-        per_str_r2 = ", ".join([f"{PROPERTY_NAMES[i]}: {float(r2_per[i]):.4f}" for i in range(len(r2_per))])
-        logging.info(f"  Val R2  (per target): {per_str_r2}")
-
     abs_err = np.abs(val_pred - val_true)
     p =[int(x) for x in hp.get("error_percentiles", [50, 90, 95, 99])]
     stats_all = compute_error_percentiles(abs_err, p)
-    logging.info("  Val |error| stats (all targets pooled): " + ", ".join([f"{k}={v:.6g}" for k, v in stats_all.items()]))
 
     if abs_err.ndim == 2:
         max_per_sample = abs_err.max(axis=1)
     else:
         max_per_sample = abs_err
     stats_smax = compute_error_percentiles(max_per_sample, p)
-    logging.info("  Val max(|error|) per-sample stats: " + ", ".join([f"{k}={v:.6g}" for k, v in stats_smax.items()]))
 
     if bool(hp.get("save_epoch_reports", True)):
         os.makedirs(REPORT_DIR, exist_ok=True)
@@ -555,14 +524,6 @@ def log_val_diagnostics(
 
             w.writerow(row)
 
-    if abs_err.ndim == 2:
-        for ti in range(abs_err.shape[1]):
-            st = compute_error_percentiles(abs_err[:, ti], p)
-            logging.info(
-                f"  Val |error| stats ({PROPERTY_NAMES[ti]}): " +
-                ", ".join([f"{k}={v:.6g}" for k, v in st.items()])
-            )
-
     k = int(hp.get("worst_k", 10))
     every = int(hp.get("log_worst_k_every", 5))
 
@@ -602,9 +563,8 @@ def log_val_diagnostics(
 
             if prev_pairs is not None and curr_pairs:
                 overlap = len(prev_pairs & curr_pairs)
-                logging.info(f"  Worst-{k} overlap vs prev epoch: {overlap}/{len(curr_pairs)} ({overlap/len(curr_pairs)*100:.1f}%)")
             if prev_top1 is not None and top1_pair is not None:
-                logging.info(f"  Worst-1 same as prev epoch: {bool(prev_top1 == top1_pair)} (prev={prev_top1}, curr={top1_pair})")
+                _ = bool(prev_top1 == top1_pair)
 
             tracker["prev_pairs"] = curr_pairs
             tracker["prev_top1"] = top1_pair
@@ -638,14 +598,6 @@ def log_val_diagnostics(
                     w.writerow(row)
 
         if k > 0 and every > 0 and ((epoch + 1) % every == 0):
-            if worst_rows:
-                logging.info(f"  Worst-{k} samples by max(|err|) across targets:")
-                for r in worst_rows[:k]:
-                    logging.info(
-                        f"    id={r['id']} score={r['score']:.6f} "
-                        f"worst_target={r.get('worst_target','')} worst_abs_err={r.get('worst_abs_err', float('nan')):.6f}"
-                    )
-
             if bool(hp.get("save_epoch_reports", True)):
                 os.makedirs(REPORT_DIR, exist_ok=True)
                 out_csv = os.path.join(REPORT_DIR, f"val_worstk_epoch{epoch+1:03d}.csv")
@@ -654,16 +606,11 @@ def log_val_diagnostics(
             if val_true.ndim == 2 and val_true.shape[1] >= 1:
                 for ti in range(val_true.shape[1]):
                     w_t = get_worst_k_samples(val_true[:, [ti]], val_pred[:, [ti]], identifiers, k=k, reduce="max")
-                    if w_t:
-                        logging.info(f"  Worst-{k} samples for target={PROPERTY_NAMES[ti]}:")
-                        for r in w_t[:k]:
-                            logging.info(f"    id={r['id']} err={r['score']:.6f} true={r['true']} pred={r['pred']}")
-                        if bool(hp.get("save_epoch_reports", True)):
-                            out_csv_t = os.path.join(REPORT_DIR, f"val_worstk_{ti}_epoch{epoch+1:03d}.csv")
-                            save_worst_k_csv(w_t, out_csv_t)
+                    if w_t and bool(hp.get("save_epoch_reports", True)):
+                        out_csv_t = os.path.join(REPORT_DIR, f"val_worstk_{ti}_epoch{epoch+1:03d}.csv")
+                        save_worst_k_csv(w_t, out_csv_t)
 
-    logging.info(f"  Val R2(mean)={r2_mean:.4f}, Val MAE(mean)={mae_mean:.6f}")
-    return mae_mean
+    return mae_mean, r2_mean
 
 
 def train_one_run(
@@ -690,7 +637,6 @@ def train_one_run(
     criterion = build_loss(hp)
     optimizer = build_optimizer(model, hp)
     
-    # [수정됨] Noam 스케줄러 적용
     steps_per_epoch = len(train_loader)
     scheduler = build_noam_scheduler(optimizer, int(hp["epochs"]), steps_per_epoch)
 
@@ -710,7 +656,7 @@ def train_one_run(
             device,
             grad_clip_norm=hp.get("grad_clip_norm", None),
             log_grad_norm=False,
-            scheduler=scheduler,  #[수정됨] 스케줄러를 train_epoch에 전달
+            scheduler=scheduler,
         )
         train_loss = float(train_out['loss']) if isinstance(train_out, dict) else float(train_out)
         
@@ -725,31 +671,30 @@ def train_one_run(
             val_pred = inverse_scale_labels(val_pred_scaled, label_median, label_iqr)
             val_true = inverse_scale_labels(val_true_scaled, label_median, label_iqr)
 
-        logging.info(
-            f"Epoch {epoch+1}/{hp['epochs']}: "
-            f"TrainLoss={train_loss:.6f}, ValLoss={val_loss:.6f}"
-        )
-
         if val_pred.size == 0 or val_true.size == 0:
+            logging.info(
+                f"Epoch {epoch+1}/{hp['epochs']}: "
+                f"TrainLoss={train_loss:.6f}, ValLoss={val_loss:.6f}, ValR2=nan, ValMAE=nan"
+            )
             continue
 
-        val_mae = log_val_diagnostics(epoch, hp, val_true, val_pred, val_ids, tracker=worst_tracker)
+        val_mae, val_r2 = log_val_diagnostics(epoch, hp, val_true, val_pred, val_ids, tracker=worst_tracker)
+        logging.info(
+            f"Epoch {epoch+1}/{hp['epochs']}: "
+            f"TrainLoss={train_loss:.6f}, ValLoss={val_loss:.6f}, ValR2={val_r2:.4f}, ValMAE={val_mae:.6f}"
+        )
 
         if val_mae < best_val_mae:
             best_val_mae = float(val_mae)
             best_epoch = int(epoch + 1)
             torch.save(model.state_dict(), MODEL_SAVE_PATH)
-            logging.info(f"  Saved best model (val MAE={best_val_mae:.6f}) at epoch {best_epoch}")
 
     result: Dict[str, Any] = {"best_val_mae": best_val_mae, "best_epoch": best_epoch}
 
     final_model_path = MODEL_SAVE_PATH
     final_best_val_mae = float(best_val_mae)
     final_best_epoch = int(best_epoch)
-
-    # -------------------------
-    # Stage 2: hard-example mining fine-tune (optional)
-    # -------------------------
+    # Optional hard-example mining fine-tune.
     if bool(hp.get("enable_hard_mining", False)):
         model.load_state_dict(torch.load(final_model_path, map_location=device))
         model.eval()
@@ -823,7 +768,6 @@ def train_one_run(
                     stage2_criterion = build_loss(stage2_hp)
                     stage2_optimizer = build_optimizer(model, stage2_hp)
                     
-                    # [수정됨] Stage 2에도 Noam 스케줄러 적용
                     stage2_steps_per_epoch = len(stage2_train_loader)
                     stage2_scheduler = build_noam_scheduler(stage2_optimizer, stage2_epochs, stage2_steps_per_epoch)
 
@@ -841,7 +785,7 @@ def train_one_run(
                             device,
                             grad_clip_norm=stage2_hp.get("grad_clip_norm", None),
                             log_grad_norm=False,
-                            scheduler=stage2_scheduler, # [수정됨]
+                            scheduler=stage2_scheduler,
                         )
                         tr_loss2 = float(train2_out['loss']) if isinstance(train2_out, dict) else float(train2_out)
                         v_loss2, vpred_s2, vtrue_s2, vids2 = evaluate_epoch(model, val_loader, stage2_criterion, device)
@@ -852,23 +796,25 @@ def train_one_run(
                             vpred2 = inverse_scale_labels(vpred_s2, label_median, label_iqr)
                             vtrue2 = inverse_scale_labels(vtrue_s2, label_median, label_iqr)
 
-                        logging.info(
-                            f"Stage2 Epoch {e2+1}/{stage2_epochs}: TrainLoss={tr_loss2:.6f}, ValLoss={v_loss2:.6f}"
-                        )
                         if vpred2.size and vtrue2.size:
-                            v_mae2 = log_val_diagnostics(
+                            v_mae2, v_r2_2 = log_val_diagnostics(
                                 e2, stage2_hp, vtrue2, vpred2, vids2, tracker=stage2_worst_tracker
+                            )
+                            logging.info(
+                                f"Stage2 Epoch {e2+1}/{stage2_epochs}: "
+                                f"TrainLoss={tr_loss2:.6f}, ValLoss={v_loss2:.6f}, ValR2={v_r2_2:.4f}, ValMAE={v_mae2:.6f}"
                             )
                         else:
                             v_mae2 = float("inf")
+                            logging.info(
+                                f"Stage2 Epoch {e2+1}/{stage2_epochs}: "
+                                f"TrainLoss={tr_loss2:.6f}, ValLoss={v_loss2:.6f}, ValR2=nan, ValMAE=nan"
+                            )
 
                         if v_mae2 < stage2_best_val_mae:
                             stage2_best_val_mae = float(v_mae2)
                             stage2_best_epoch = int(e2 + 1)
                             torch.save(model.state_dict(), STAGE2_MODEL_SAVE_PATH)
-                            logging.info(
-                                f"  Saved best stage-2 model (val MAE={stage2_best_val_mae:.6f}) at epoch {stage2_best_epoch}"
-                            )
 
                     if stage2_best_val_mae < final_best_val_mae:
                         final_model_path = STAGE2_MODEL_SAVE_PATH
@@ -881,13 +827,6 @@ def train_one_run(
         else:
             logging.info("Hard-mining: train predictions unavailable; stage-2 skipped.")
 
-    if skip_test:
-        return result
-
-    if len(test_loader.dataset) == 0:
-        logging.warning("Test dataset is empty.")
-        return result
-
     final_ckpt_path = MODEL_SAVE_PATH
     if bool(hp.get("enable_hard_mining", False)) and os.path.exists(STAGE2_MODEL_SAVE_PATH):
         final_ckpt_path = STAGE2_MODEL_SAVE_PATH
@@ -897,6 +836,48 @@ def train_one_run(
     except TypeError:
         state = torch.load(final_ckpt_path, map_location=device)
     model.load_state_dict(state)
+
+    if bool(hp.get("save_feature_importance", True)):
+        fi_split, fi_loader = _resolve_feature_importance_loader(
+            data_list,
+            train_indices,
+            val_loader,
+            test_loader,
+            hp,
+            skip_test=skip_test,
+        )
+        if fi_loader is None:
+            logging.warning("Feature importance skipped: no evaluation split available.")
+        else:
+            fi_repeats = int(hp.get("feature_importance_repeats", 5) or 1)
+            fi_seed = int(hp.get("feature_importance_seed", SEED) or SEED)
+            fi_rows = compute_block_permutation_importance(
+                model,
+                fi_loader,
+                device,
+                label_median,
+                label_iqr,
+                repeats=fi_repeats,
+                seed=fi_seed,
+                split_name=fi_split,
+            )
+            if fi_rows:
+                save_block_permutation_importance_csv(fi_rows, FEATURE_IMPORTANCE_CSV_PATH)
+                result["feature_importance_csv"] = FEATURE_IMPORTANCE_CSV_PATH
+                result["feature_importance_split"] = fi_split
+                logging.info(
+                    f"Saved block permutation feature importance to {FEATURE_IMPORTANCE_CSV_PATH} "
+                    f"(split={fi_split}, repeats={fi_repeats})"
+                )
+            else:
+                logging.warning("Feature importance skipped: prediction collection returned no samples.")
+
+    if skip_test:
+        return result
+
+    if len(test_loader.dataset) == 0:
+        logging.warning("Test dataset is empty.")
+        return result
 
     id2smiles = _load_id_to_smiles_map() if bool(hp.get("include_smiles_in_worstk", True)) else {}
     final_k = int(hp.get("final_worst_k", hp.get("worst_k", 20)))
@@ -967,20 +948,6 @@ def train_one_run(
             output_dir=OUTPUT_DIR,
         )
 
-    if bool(hp.get("save_feature_importance", True)):
-        fi_rows = compute_block_permutation_importance(
-            model=model,
-            loader=test_loader,
-            criterion=criterion,
-            device=device,
-            label_median=label_median,
-            label_iqr=label_iqr,
-            hp=hp,
-            num_node_features=num_node_features,
-        )
-        if fi_rows:
-            result["feature_importance_csv"] = FEATURE_IMPORTANCE_RESULTS_PATH
-
     return result
 
 
@@ -1042,3 +1009,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

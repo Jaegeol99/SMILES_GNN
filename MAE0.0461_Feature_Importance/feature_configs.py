@@ -1,7 +1,5 @@
 from __future__ import annotations
-
 from typing import Dict, List, Set
-
 from rdkit import Chem
 from rdkit.Chem import Descriptors
 

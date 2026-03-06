@@ -206,6 +206,10 @@ def build_noam_scheduler(optimizer, epochs, steps_per_epoch):
     return LambdaLR(optimizer, lr_lambda)
 
 
+def _clone_state_dict_to_cpu(model: nn.Module) -> Dict[str, torch.Tensor]:
+    return {name: tensor.detach().cpu().clone() for name, tensor in model.state_dict().items()}
+
+
 def _make_block_permutation_specs() -> List[Dict[str, Any]]:
     line_node_bond_start = TOTAL_FEATURE_DIMENSION
     line_node_pe_src_start = line_node_bond_start + NUM_BOND_FEATURES
@@ -628,19 +632,6 @@ def log_val_diagnostics(
                         w.writerow(header)
                     w.writerow(row)
 
-        if k > 0 and every > 0 and ((epoch + 1) % every == 0):
-            if bool(hp.get("save_epoch_reports", True)):
-                os.makedirs(REPORT_DIR, exist_ok=True)
-                out_csv = os.path.join(REPORT_DIR, f"val_worstk_epoch{epoch+1:03d}.csv")
-                save_worst_k_csv(worst_rows, out_csv)
-
-            if val_true.ndim == 2 and val_true.shape[1] >= 1:
-                for ti in range(val_true.shape[1]):
-                    w_t = get_worst_k_samples(val_true[:, [ti]], val_pred[:, [ti]], identifiers, k=k, reduce="max")
-                    if w_t and bool(hp.get("save_epoch_reports", True)):
-                        out_csv_t = os.path.join(REPORT_DIR, f"val_worstk_{ti}_epoch{epoch+1:03d}.csv")
-                        save_worst_k_csv(w_t, out_csv_t)
-
     return mae_mean, r2_mean
 
 
@@ -720,11 +711,12 @@ def train_one_run(
             best_epoch = int(epoch + 1)
             torch.save(model.state_dict(), MODEL_SAVE_PATH)
 
-    result: Dict[str, Any] = {"best_val_mae": best_val_mae, "best_epoch": best_epoch}
-
     final_model_path = MODEL_SAVE_PATH
     final_best_val_mae = float(best_val_mae)
     final_best_epoch = int(best_epoch)
+    selected_stage = "stage1"
+    stage2_best_val_mae: Optional[float] = None
+    stage2_best_epoch: Optional[int] = None
     # Optional hard-example mining fine-tune.
     if bool(hp.get("enable_hard_mining", False)):
         model.load_state_dict(torch.load(final_model_path, map_location=device))
@@ -808,8 +800,9 @@ def train_one_run(
                     stage2_steps_per_epoch = len(stage2_train_loader)
                     stage2_scheduler = build_noam_scheduler(stage2_optimizer, stage2_epochs, stage2_steps_per_epoch)
 
-                    stage2_best_val_mae = float("inf")
-                    stage2_best_epoch = -1
+                    stage2_best_val_mae_run = float("inf")
+                    stage2_best_epoch_run = -1
+                    stage2_best_state: Optional[Dict[str, torch.Tensor]] = None
 
                     stage2_worst_tracker: Dict[str, Any] = {"prev_pairs": None, "prev_top1": None, "pair_counts": {}}
 
@@ -848,25 +841,59 @@ def train_one_run(
                                 f"TrainLoss={tr_loss2:.6f}, ValLoss={v_loss2:.6f}, ValR2=nan, ValMAE=nan"
                             )
 
-                        if v_mae2 < stage2_best_val_mae:
-                            stage2_best_val_mae = float(v_mae2)
-                            stage2_best_epoch = int(e2 + 1)
-                            torch.save(model.state_dict(), STAGE2_MODEL_SAVE_PATH)
+                        if v_mae2 < stage2_best_val_mae_run:
+                            stage2_best_val_mae_run = float(v_mae2)
+                            stage2_best_epoch_run = int(e2 + 1)
+                            stage2_best_state = _clone_state_dict_to_cpu(model)
 
-                    if stage2_best_val_mae < final_best_val_mae:
+                    if stage2_best_epoch_run > 0:
+                        stage2_best_val_mae = float(stage2_best_val_mae_run)
+                        stage2_best_epoch = int(stage2_best_epoch_run)
+
+                    if (
+                        stage2_best_state is not None
+                        and stage2_best_val_mae is not None
+                        and stage2_best_val_mae < final_best_val_mae
+                    ):
+                        torch.save(stage2_best_state, STAGE2_MODEL_SAVE_PATH)
                         final_model_path = STAGE2_MODEL_SAVE_PATH
                         final_best_val_mae = float(stage2_best_val_mae)
                         final_best_epoch = int(stage2_best_epoch)
-                        result["best_val_mae_stage2"] = float(stage2_best_val_mae)
-                        result["best_epoch_stage2"] = int(stage2_best_epoch)
+                        selected_stage = "stage2"
             else:
                 logging.info("Hard-mining: top_k==0; stage-2 skipped.")
         else:
             logging.info("Hard-mining: train predictions unavailable; stage-2 skipped.")
 
-    final_ckpt_path = MODEL_SAVE_PATH
-    if bool(hp.get("enable_hard_mining", False)) and os.path.exists(STAGE2_MODEL_SAVE_PATH):
-        final_ckpt_path = STAGE2_MODEL_SAVE_PATH
+    result: Dict[str, Any] = {
+        "best_val_mae": final_best_val_mae,
+        "best_epoch": final_best_epoch,
+        "stage1_best_val_mae": float(best_val_mae),
+        "stage1_best_epoch": int(best_epoch),
+        "stage2_best_val_mae": stage2_best_val_mae,
+        "stage2_best_epoch": stage2_best_epoch,
+        "selected_stage": selected_stage,
+        "selected_checkpoint_path": final_model_path,
+    }
+
+    if stage2_best_val_mae is None:
+        logging.info(
+            "Best checkpoint comparison: stage1 ValMAE=%.6f (epoch %d), stage2 not selected or not run, final=%s.",
+            float(best_val_mae),
+            int(best_epoch),
+            selected_stage,
+        )
+    else:
+        logging.info(
+            "Best checkpoint comparison: stage1 ValMAE=%.6f (epoch %d), stage2 ValMAE=%.6f (epoch %d), final=%s.",
+            float(best_val_mae),
+            int(best_epoch),
+            float(stage2_best_val_mae),
+            int(stage2_best_epoch),
+            selected_stage,
+        )
+
+    final_ckpt_path = final_model_path
 
     try:
         state = torch.load(final_ckpt_path, map_location=device, weights_only=True)
@@ -1044,7 +1071,7 @@ def main() -> None:
     logging.info("Global feature scaling ready in %.2fs.", time.perf_counter() - stage_started_at)
 
     training_started_at = time.perf_counter()
-    train_one_run(
+    result = train_one_run(
         data_list,
         num_node_features,
         train_indices,
@@ -1056,6 +1083,23 @@ def main() -> None:
         device,
         make_plots=not args.no_plots,
     )
+    stage2_mae = result.get("stage2_best_val_mae", None)
+    if stage2_mae is None:
+        logging.info(
+            "Final selection summary: stage1 ValMAE=%.6f (epoch %d), stage2 unavailable, selected=%s.",
+            float(result.get("stage1_best_val_mae", float("nan"))),
+            int(result.get("stage1_best_epoch", -1)),
+            str(result.get("selected_stage", "stage1")),
+        )
+    else:
+        logging.info(
+            "Final selection summary: stage1 ValMAE=%.6f (epoch %d), stage2 ValMAE=%.6f (epoch %d), selected=%s.",
+            float(result.get("stage1_best_val_mae", float("nan"))),
+            int(result.get("stage1_best_epoch", -1)),
+            float(stage2_mae),
+            int(result.get("stage2_best_epoch", -1)),
+            str(result.get("selected_stage", "stage1")),
+        )
     logging.info(
         "Training and evaluation finished in %.2fs (total runtime %.2fs).",
         time.perf_counter() - training_started_at,

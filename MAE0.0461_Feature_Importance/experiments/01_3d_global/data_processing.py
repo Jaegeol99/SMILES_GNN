@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+import logging
+import os
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -10,7 +13,8 @@ from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 
-from config import CSV_INDEX_COL, CSV_PATH, CSV_SMILES_COL, CSV_TARGET_COL, MAX_SAMPLES
+import config as config_module
+from config import CSV_INDEX_COL, CSV_PATH, CSV_SMILES_COL, CSV_TARGET_COL, MAX_SAMPLES, OUTPUT_DIR
 from feature_configs import (
     FUNCTIONAL_GROUP_PATTERNS,
     GLOBAL_FEATURE_DIM,
@@ -32,6 +36,15 @@ from feature_configs import (
     scale_count,
     scale_signed,
 )
+
+
+PREPROCESSED_DATA_CACHE_PATH: str = str(
+    getattr(config_module, "PREPROCESSED_DATA_CACHE_PATH", os.path.join(OUTPUT_DIR, "qm9_preprocessed_cache.pt"))
+)
+USE_PREPROCESSED_CACHE: bool = bool(getattr(config_module, "USE_PREPROCESSED_CACHE", True))
+REBUILD_PREPROCESSED_CACHE: bool = bool(getattr(config_module, "REBUILD_PREPROCESSED_CACHE", False))
+PREPROCESS_LOG_EVERY: int = int(getattr(config_module, "PREPROCESS_LOG_EVERY", 5000))
+PREPROCESSED_CACHE_VERSION: int = int(getattr(config_module, "PREPROCESSED_CACHE_VERSION", 1))
 
 
 THREE_D_EMBED_SEED: int = 42
@@ -149,6 +162,93 @@ def compute_global_features(mol: Chem.Mol) -> torch.Tensor:
     desc = np.concatenate([desc, desc_3d], axis=0).astype(np.float32, copy=False)
     desc = np.nan_to_num(desc, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32, copy=False)
     return torch.from_numpy(desc).view(1, -1)
+
+
+def _build_preprocessed_cache_metadata() -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {
+        "cache_version": int(PREPROCESSED_CACHE_VERSION),
+        "csv_path": os.path.abspath(CSV_PATH),
+        "max_samples": MAX_SAMPLES,
+        "total_feature_dimension": int(TOTAL_FEATURE_DIMENSION),
+        "line_node_feature_dim": int(LINE_NODE_FEATURE_DIM),
+        "num_line_edge_features": int(NUM_LINE_EDGE_FEATURES),
+        "global_feature_dim": int(GLOBAL_FEATURE_DIM),
+        "laplacian_pe_k": int(LAPLACIAN_PE_K),
+    }
+    try:
+        stat = os.stat(CSV_PATH)
+        metadata["csv_size"] = int(stat.st_size)
+        metadata["csv_mtime_ns"] = int(stat.st_mtime_ns)
+    except OSError:
+        metadata["csv_size"] = None
+        metadata["csv_mtime_ns"] = None
+    return metadata
+
+
+def _load_preprocessed_cache() -> Optional[Tuple[List[Tuple[Data, Data]], int]]:
+    if not USE_PREPROCESSED_CACHE:
+        return None
+    if REBUILD_PREPROCESSED_CACHE:
+        logging.info("Skipping preprocessed cache because REBUILD_PREPROCESSED_CACHE=True.")
+        return None
+    if not os.path.exists(PREPROCESSED_DATA_CACHE_PATH):
+        return None
+
+    started_at = time.perf_counter()
+    try:
+        try:
+            payload = torch.load(PREPROCESSED_DATA_CACHE_PATH, map_location="cpu", weights_only=False)
+        except TypeError:
+            payload = torch.load(PREPROCESSED_DATA_CACHE_PATH, map_location="cpu")
+    except Exception as exc:
+        logging.warning(f"Failed to load preprocessed cache {PREPROCESSED_DATA_CACHE_PATH}: {exc}")
+        return None
+
+    if not isinstance(payload, dict):
+        logging.warning("Ignoring preprocessed cache because its payload format is invalid.")
+        return None
+
+    expected_metadata = _build_preprocessed_cache_metadata()
+    if payload.get("metadata") != expected_metadata:
+        logging.info("Preprocessed cache is stale; rebuilding graph dataset from CSV.")
+        return None
+
+    data_list = payload.get("data_list")
+    num_node_features = int(payload.get("num_node_features", TOTAL_FEATURE_DIMENSION))
+    if not isinstance(data_list, list):
+        logging.warning("Ignoring preprocessed cache because data_list is missing or invalid.")
+        return None
+
+    elapsed = time.perf_counter() - started_at
+    logging.info(
+        "Loaded preprocessed dataset cache from %s in %.2fs (%d molecules).",
+        PREPROCESSED_DATA_CACHE_PATH,
+        elapsed,
+        len(data_list),
+    )
+    return data_list, num_node_features
+
+
+def _save_preprocessed_cache(data_list: List[Tuple[Data, Data]], num_node_features: int) -> None:
+    if not USE_PREPROCESSED_CACHE:
+        return
+
+    os.makedirs(os.path.dirname(PREPROCESSED_DATA_CACHE_PATH) or OUTPUT_DIR, exist_ok=True)
+    payload = {
+        "metadata": _build_preprocessed_cache_metadata(),
+        "data_list": data_list,
+        "num_node_features": int(num_node_features),
+    }
+
+    started_at = time.perf_counter()
+    try:
+        torch.save(payload, PREPROCESSED_DATA_CACHE_PATH)
+    except Exception as exc:
+        logging.warning(f"Failed to save preprocessed cache {PREPROCESSED_DATA_CACHE_PATH}: {exc}")
+        return
+
+    elapsed = time.perf_counter() - started_at
+    logging.info("Saved preprocessed dataset cache to %s in %.2fs.", PREPROCESSED_DATA_CACHE_PATH, elapsed)
 
 
 def compute_laplacian_pe(mol: Chem.Mol, k: int) -> np.ndarray:
@@ -348,12 +448,24 @@ def smiles_to_graph_data(smiles: str, labels: List[float], mol_id: Optional[int]
 
 
 def load_and_preprocess_qm9_data() -> Tuple[List[Tuple[Data, Data]], int]:
+    cached = _load_preprocessed_cache()
+    if cached is not None:
+        return cached
+
+    started_at = time.perf_counter()
     df = pd.read_csv(CSV_PATH)
     if MAX_SAMPLES is not None:
         df = df.iloc[:MAX_SAMPLES].copy()
 
+    total_rows = len(df)
+    logging.info(
+        "Building graph dataset from %s (%d rows). This is CPU-bound and can take several minutes on the first run.",
+        CSV_PATH,
+        total_rows,
+    )
+
     data_list: List[Tuple[Data, Data]] = []
-    for row_idx, row in enumerate(df.itertuples(index=False)):
+    for row_idx, row in enumerate(df.itertuples(index=False), start=1):
         smiles = getattr(row, CSV_SMILES_COL, None)
         target = getattr(row, CSV_TARGET_COL, None)
         mol_id = getattr(row, CSV_INDEX_COL, None)
@@ -367,6 +479,20 @@ def load_and_preprocess_qm9_data() -> Tuple[List[Tuple[Data, Data]], int]:
         res = smiles_to_graph_data(smiles, [float(target)], mol_id=mol_id)
         if res is not None:
             data_list.append(res)
+
+        if PREPROCESS_LOG_EVERY > 0 and (row_idx % PREPROCESS_LOG_EVERY == 0 or row_idx == total_rows):
+            elapsed = time.perf_counter() - started_at
+            logging.info(
+                "Preprocessing molecules: %d/%d rows, %d valid graph pairs, elapsed %.2fs",
+                row_idx,
+                total_rows,
+                len(data_list),
+                elapsed,
+            )
+
+    elapsed = time.perf_counter() - started_at
+    logging.info("Finished preprocessing %d rows into %d graph pairs in %.2fs.", total_rows, len(data_list), elapsed)
+    _save_preprocessed_cache(data_list, TOTAL_FEATURE_DIMENSION)
     return data_list, TOTAL_FEATURE_DIMENSION
 
 

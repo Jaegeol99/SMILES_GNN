@@ -13,6 +13,7 @@ from rdkit.Chem import AllChem, Descriptors
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 
+import config as config_module
 from config import (
     CSV_INDEX_COL,
     CSV_PATH,
@@ -20,11 +21,6 @@ from config import (
     CSV_TARGET_COL,
     MAX_SAMPLES,
     OUTPUT_DIR,
-    PREPROCESSED_CACHE_VERSION,
-    PREPROCESSED_DATA_CACHE_PATH,
-    PREPROCESS_LOG_EVERY,
-    REBUILD_PREPROCESSED_CACHE,
-    USE_PREPROCESSED_CACHE,
 )
 from feature_configs import (
     FUNCTIONAL_GROUP_PATTERNS,
@@ -46,6 +42,15 @@ from feature_configs import (
     scale_count,
     scale_signed,
 )
+
+
+PREPROCESSED_DATA_CACHE_PATH: str = str(
+    getattr(config_module, "PREPROCESSED_DATA_CACHE_PATH", os.path.join(OUTPUT_DIR, "qm9_preprocessed_cache.pt"))
+)
+USE_PREPROCESSED_CACHE: bool = bool(getattr(config_module, "USE_PREPROCESSED_CACHE", True))
+REBUILD_PREPROCESSED_CACHE: bool = bool(getattr(config_module, "REBUILD_PREPROCESSED_CACHE", False))
+PREPROCESS_LOG_EVERY: int = int(getattr(config_module, "PREPROCESS_LOG_EVERY", 5000))
+PREPROCESSED_CACHE_VERSION: int = int(getattr(config_module, "PREPROCESSED_CACHE_VERSION", 1))
 
 
 def compute_global_features(mol: Chem.Mol) -> torch.Tensor:

@@ -18,11 +18,6 @@ LABEL_SCALING_PARAMS_PATH: str = f"{OUTPUT_DIR}/label_scaler.npz"
 GLOBAL_SCALING_PARAMS_PATH: str = f"{OUTPUT_DIR}/global_desc_standard_scaler.npz"
 REPORT_DIR: str = f"{OUTPUT_DIR}/reports"
 FEATURE_IMPORTANCE_CSV_PATH: str = f"{REPORT_DIR}/feature_importance_block_permutation.csv"
-PREPROCESSED_DATA_CACHE_PATH: str = f"{OUTPUT_DIR}/qm9_preprocessed_cache.pt"
-USE_PREPROCESSED_CACHE: bool = True
-REBUILD_PREPROCESSED_CACHE: bool = False
-PREPROCESS_LOG_EVERY: int = 5000
-PREPROCESSED_CACHE_VERSION: int = 1
 
 LOGGING_LEVEL: int = logging.INFO
 LOG_FORMAT: str = "%(asctime)s - %(levelname)s - %(message)s"
@@ -31,7 +26,7 @@ SEED: int = 42
 
 HYPERPARAMS: Dict[str, Any] = {
     "batch_size": 50,
-    "epochs": 150,
+    "epochs": 100,
     "test_split_ratio": 0.2,
     "random_state": 42,
 
